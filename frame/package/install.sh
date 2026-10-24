@@ -26,6 +26,9 @@ systemctl --user enable --now questlhsync.service
 echo "lhsyncd installed in $DEST and running"
 if systemctl --user is-active --quiet steamvr.service; then
   echo "restarting SteamVR on the headset to load the questlhsync_frame driver"
-  systemctl --user restart steamvr.service
+  # LighthouseSync: in a unit of its own, after lighthousesync-apply.service when that is what runs this. It's ordered
+  # before steamvr.service, so a restart from inside it would wait for it to finish, which waits for the restart
+  systemd-run --user --no-block --collect --quiet -p After=lighthousesync-apply.service \
+    systemctl --user restart steamvr.service
 fi
 echo "done: start SteamVR on the PC"

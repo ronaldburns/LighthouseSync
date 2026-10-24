@@ -552,8 +552,15 @@ struct Panel : panel_ui::Actions {
     local_dirty = true;
   }
 
-  // lighthousesync-apply.service runs install-frame.sh --apply, which restarts the headset's SteamVR, and this with it
-  void Install() override { Spawn({"systemctl", "--user", "start", "--no-block", "lighthousesync-apply.service"}); }
+  // install-frame.sh --apply, which restarts the headset's SteamVR and this with it, in a unit of its own: not
+  // lighthousesync-apply.service, which is ordered before steamvr.service, so SteamVR's restart would wait for it to
+  // finish while it waits for the restart (SteamVR stopped, never started again)
+  void Install() override {
+    if (st.staged.empty()) return;
+    std::string script = lhs + "/install-frame.sh";
+    Spawn({"systemd-run", "--user", "--no-block", "--collect", "--quiet", "--unit=lighthousesync-install",
+           script.c_str(), "--apply"});
+  }
 
   void RestartDaemon() override {
     Spawn({"systemctl", "--user", "restart", "questlhsync.service"});
