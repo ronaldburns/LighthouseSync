@@ -19,6 +19,10 @@ namespace {
 constexpr double kFarM = 0.15, kFarDeg = 2.5;
 constexpr double kAgreeM = 0.06, kAgreeDeg = 1.0;  // two far ones this close: the station's new place
 constexpr size_t kKeepRel = 30;                     // the newest relationships a pair keeps
+// LighthouseSync: fewer than this and the average doesn't stand. SteamVR keeps its own, and a far one starts the pair
+// over: one taken in SteamVR's first minutes, while it still places its stations, otherwise stays for good, the later
+// readings of the right place too far apart to agree on another
+constexpr size_t kTrusted = 3;
 constexpr int kSayPerMin = 10;                      // log lines a minute at most
 constexpr uint64_t kSaveMs = 10000;                 // relations.json written at most this often
 
@@ -204,9 +208,19 @@ bool Relations::Average(uint32_t a, uint32_t b, const float rel[7], float out[7]
       v.push_back(p);
       if (v.size() > kKeepRel) v.erase(v.begin());
       if (pend != pending_.end()) pending_.erase(pend);
-      said = Fmt("base stations %s: SteamVR measured them %.1f cm and %.2f deg from the average of %zu, which it "
-                 "gets instead",
+      said = v.size() < kTrusted
+                 ? Fmt("base stations %s: SteamVR measured them %.1f cm and %.2f deg from the average of %zu, kept "
+                       "for averaging",
+                       pair.c_str(), cm, deg, v.size())
+                 : Fmt("base stations %s: SteamVR measured them %.1f cm and %.2f deg from the average of %zu, which it "
+                       "gets instead",
+                       pair.c_str(), cm, deg, v.size());
+    } else if (v.size() < kTrusted) {
+      said = Fmt("base stations %s: SteamVR measured them %.1f cm and %.2f deg from the average of %zu, too few to "
+                 "stand: averaging from this one",
                  pair.c_str(), cm, deg, v.size());
+      v = {p};
+      if (pend != pending_.end()) pending_.erase(pend);
     } else if (pend != pending_.end() && !Far(p, pend->second, kAgreeM, kAgreeDeg)) {
       v = {pend->second, p};
       pending_.erase(pend);
@@ -222,6 +236,7 @@ bool Relations::Average(uint32_t a, uint32_t b, const float rel[7], float out[7]
   }
   dirty_ = true;
   Say(said);
+  if (v.size() < kTrusted) return false;
   Pose m = Mean(v);
   if (flip) m = Inv(m);
   ToF(m, out);
