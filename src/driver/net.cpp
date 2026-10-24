@@ -1,4 +1,5 @@
 #include "net.h"
+#include "lhs_driver.h"
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -436,6 +437,7 @@ bool HeadsetLink::Session(const Found &f) {
         calib_need = 0;
         if (sync_->SetCalibration(json, &err)) {
           have_calib = true;
+          lhs::OnCalibration(json);
           log_("camera calibration: " + calib_name.substr(0, calib_name.find('/')));  // the kind, not the device's id
         } else {
           log_("camera calibration " + calib_name + " unusable: " + err);
@@ -450,6 +452,7 @@ bool HeadsetLink::Session(const Found &f) {
       pos = e + 1;
       if (!line.empty() && line.back() == '\r') line.pop_back();
       if (line.size() < 2 || line[1] != ' ') continue;
+      lhs::OnLine(rx, line);
       switch (line[0]) {
         case 'F':
           last_frame_ = rx;

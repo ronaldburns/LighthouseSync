@@ -5,3 +5,4 @@ magisk/build/
 magisk/frida/
 frame/build/
 __pycache__/
+src/common/lhs_build.h

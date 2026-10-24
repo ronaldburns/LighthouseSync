@@ -29,6 +29,7 @@
 #include "../common/qlhs_status.h"
 #include "MinHook.h"
 #include "gravity.h"
+#include "lhs_driver.h"
 #include "net.h"
 #include "openvr_driver.h"
 #include "relations.h"
@@ -319,6 +320,7 @@ class Provider : public vr::IServerTrackedDeviceProvider {
       g_st->magic = QLHS_MAGIC;
     }
     Log("QuestLHSync " QLHS_RELEASE " driver starting, data in %LOCALAPPDATA%\\QuestLHSync");
+    lhs::Init([](const std::string &s) { Log(s); });
     SyncConfig cfg;
     cfg.dir = dir_;
     cfg.per_headset = true;
@@ -691,6 +693,7 @@ class Provider : public vr::IServerTrackedDeviceProvider {
     started_ = QpcNow();
     while (run_) {
       double now = QpcNow();
+      lhs::Tick(now, *g_sync, *link_, [this] { ReadSettings(); });
       if (wired_) {  // only the status goes on, which closes a dashboard already open
         if (!stood_down_) StandDown();
       g_hide.store(false);
