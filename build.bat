@@ -33,7 +33,8 @@ cl /nologo /c /utf-8 /O2 /EHsc /std:c++17 /MT /W3 /DNDEBUG %IMGUI_DEFS% /Ithird_
 set RC_DEFS=
 if exist src\common\lhs_build.h set RC_DEFS=/DLHS_STAMPED
 rc /nologo %RC_DEFS% /Isrc\common /fo build\overlay\dashboard.res src\dashboard\dashboard.rc || exit /b 1
-cl /nologo /utf-8 /O2 /EHsc /std:c++17 /permissive- /MT /W3 /DNDEBUG /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DUNICODE /D_UNICODE /D_CRT_SECURE_NO_WARNINGS %IMGUI_DEFS% ^
+rem C++20 for C++/WinRT (ble_win.cpp): under C++17 it uses the experimental coroutines, which VS 2026 rejects
+cl /nologo /utf-8 /O2 /EHsc /std:c++20 /permissive- /MT /W3 /DNDEBUG /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DUNICODE /D_UNICODE /D_CRT_SECURE_NO_WARNINGS %IMGUI_DEFS% ^
   /I%OVR%\headers /Ithird_party\imgui /Isrc\common /Fobuild\overlay\ ^
   src\dashboard\dashboard_main.cpp src\dashboard\ui.cpp src\dashboard\theme.cpp src\dashboard\swr.cpp src\dashboard\preview.cpp ^
   src\dashboard\ble_win.cpp src\dashboard\updater_win.cpp build\imgui\*.obj build\overlay\dashboard.res ^
