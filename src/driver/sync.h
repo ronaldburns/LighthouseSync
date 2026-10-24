@@ -556,6 +556,9 @@ class Sync {
   double last_prec_ = -1e18;
   StepStat last_st_;
   bool has_last_st_ = false;
+  // LighthouseSync: each station's newest sighting that fit it, kept when the alignment is lost or recalibrated (a
+  // step's last only covers the sightings it fits now: none while acquiring) (st_m_)
+  std::map<std::string, double> seen_at_;
   std::atomic<long> nframes_{0};
   Spots spots_;  // under net_
   std::map<int, std::vector<std::pair<double, double>>> prev_big_;  // under net_: each camera's last steady lights

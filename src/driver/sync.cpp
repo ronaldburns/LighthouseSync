@@ -3540,6 +3540,10 @@ Transform Sync::Tick(double now) {
       std::lock_guard<std::mutex> g(st_m_);
       last_st_ = st;
       has_last_st_ = true;
+      for (auto &kv : st.last) {
+        auto at = seen_at_.emplace(kv.first, kv.second).first;
+        at->second = std::max(at->second, kv.second);
+      }
     }
     // not acquired: what became of the cameras' bright spots, after a minute and then every 5
     if (locked_) sum_t_ = -1;
@@ -3706,9 +3710,11 @@ Sync::Status Sync::GetStatus(double now) {
     s.rtt = clock_.rtt();
   }
   StepStat st;
+  std::map<std::string, double> seen;
   {
     std::lock_guard<std::mutex> g(st_m_);
     st = last_st_;
+    seen = seen_at_;
   }
   s.cond = st.cond;
   s.n = st.n;
@@ -3735,8 +3741,8 @@ Sync::Status Sync::GetStatus(double now) {
     e.measured = solver_.measured(keys[i]);
     auto it = st.per.find(keys[i]);
     e.support = it == st.per.end() ? 0 : it->second;
-    auto lt = st.last.find(keys[i]);
-    e.last_seen = lt == st.last.end() ? -1 : std::max(0.0, now - lt->second);
+    auto lt = seen.find(keys[i]);
+    e.last_seen = lt == seen.end() ? -1 : std::max(0.0, now - lt->second);
     if (s.has_x && hh) e.dist = norm(Ry(s.x[0]) * S[i] + V3{s.x[1], s.x[2], s.x[3]} - head);
     s.st.push_back(e);
   }
