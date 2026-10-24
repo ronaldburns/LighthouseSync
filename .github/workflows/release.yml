@@ -1,0 +1,130 @@
+name: Release
+on:
+  push:
+    branches:
+      - master
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Versions come from the tags so far, so don't let two pushes race each other
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # For the tags
+          persist-credentials: false
+
+      # v<upstream's release>.<n>: 1.26.1, 1.26.2 and so on, then 1.27.1 after merging upstream's 1.27. Plain numbers
+      # only: installed copies compare them numerically, and a suffix like -beta would sort before the release
+      - name: Pick the version
+        id: version
+        run: |
+          base=$(sed -n 's/^#define QLHS_RELEASE "\([^"]*\)".*/\1/p' src/common/qlhs_status.h)
+          [ -n "$base" ] || { echo "no QLHS_RELEASE in src/common/qlhs_status.h"; exit 1; }
+          n=$(git tag -l "v$base.*" | sed "s/^v$base\.//" | grep -xE '[0-9]+' | sort -n | tail -n 1)
+          echo "version=$base.$(( ${n:-0} + 1 ))" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    uses: ./.github/workflows/build.yml
+    with:
+      ref: ${{ github.sha }}
+      version: ${{ needs.version.outputs.version }}
+    secrets: inherit
+
+  release:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      SIGNED: ${{ secrets.AZURE_SIGNING_ENDPOINT != '' }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # For the changes since the last release
+          persist-credentials: false
+
+      - name: Download the release
+        uses: actions/download-artifact@v8
+        with:
+          name: release
+          path: release
+
+      # Commit subjects go in a code block so mentions and issue numbers in them (upstream's too) don't link or notify
+      # anyone. The notes are also the Quest module's changelog in Magisk, so SHA256SUMS is written again after
+      - name: Write the release notes
+        run: |
+          base=${VERSION%.*}
+          latest="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/latest/download"
+          previous=$(git tag -l 'v[0-9]*' --merged HEAD --sort=-v:refname | head -n 1)
+          {
+            echo "LighthouseSync $VERSION, built from [\`${GITHUB_SHA::7}\`]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commit/$GITHUB_SHA) on [QuestLHSync](https://github.com/CreoleVR/QuestLHSync) $base. LighthouseSync is a fork of QuestLHSync with its own dashboard, installers and updates, and CreoleVR doesn't support it."
+            echo
+            echo "### Install or update"
+            echo
+            echo "**PC (SteamVR):** run this in PowerShell. When SteamVR is running, the new version loads the next time it starts. After that, the dashboard's Updates page offers new versions."
+            echo
+            echo '```powershell'
+            echo "irm $latest/install.ps1 | iex"
+            echo '```'
+            echo
+            echo "**Steam Frame:** run this in a terminal in desktop mode, or over ssh. It restarts SteamVR on the headset. After that the headset downloads new versions in the background and installs them the next time it starts."
+            echo
+            echo '```sh'
+            echo "curl -fsSL $latest/install-frame.sh | bash"
+            echo '```'
+            echo
+            echo "**Quest (rooted, with Magisk):** install \`LighthouseSync-quest-module-$VERSION.zip\` from Magisk's Modules page. Magisk offers new versions after that."
+            echo
+            echo "### Checking the files"
+            echo
+            echo "\`SHA256SUMS\` has every file's SHA-256, and the installers and the dashboard check their downloads against it. Every file also has a build provenance attestation, which proves this repository's Release workflow built it: \`gh attestation verify <file> --repo $GITHUB_REPOSITORY\`."
+            if [ "$SIGNED" = true ]; then
+              echo
+              echo "The driver and the dashboard are code signed."
+            fi
+            if [ -n "$previous" ]; then
+              echo
+              echo "### Changes since $previous"
+              echo
+              echo '````'
+              git log --no-merges --format='%h %s' "$previous..HEAD"
+              echo '````'
+            fi
+          } > notes.md
+          cp notes.md release/changelog.md
+          cd release
+          rm SHA256SUMS
+          sha256sum -- * > ../SHA256SUMS
+          mv ../SHA256SUMS SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: release/*
+
+      - name: Create the release
+        run: gh release create "v$VERSION" release/* --target "$GITHUB_SHA" --title "LighthouseSync $VERSION" --notes-file notes.md

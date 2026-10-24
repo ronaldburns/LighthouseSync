@@ -1,0 +1,125 @@
+name: Build
+on:
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit or ref to build (the event's by default)
+        type: string
+        default: ''
+      version:
+        description: Release version, like 1.26.3. Without one it's a development build, which doesn't update itself
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # build.bat needs Visual Studio, and magisk/build_module.py the NDK's Windows clang
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    env:
+      # Read by lhs/stamp.py's builds, magisk/build_module.py and lhs/package.py. Empty for development builds
+      LHS_VERSION: ${{ inputs.version }}
+      LHS_REPO: ${{ inputs.version && github.repository || '' }}
+      # Azure Artifact Signing signs release builds when this repository has the secrets (see .github/README.md)
+      SIGNING_ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Stamp the version
+        if: inputs.version != ''
+        run: python lhs/stamp.py "v$LHS_VERSION" "$GITHUB_REPOSITORY"
+
+      - name: Build the SteamVR driver and dashboard
+        shell: cmd
+        run: build.bat
+
+      - name: Sign the driver and dashboard
+        if: inputs.version != '' && env.SIGNING_ENDPOINT != ''
+        uses: azure/artifact-signing-action@v2
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_CERTIFICATE_PROFILE }}
+          files: |
+            ${{ github.workspace }}\driver\questlhsync\bin\win64\driver_questlhsync.dll
+            ${{ github.workspace }}\driver\questlhsync\bin\win64\QuestLHSync.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          description: LighthouseSync
+          description-url: ${{ github.server_url }}/${{ github.repository }}
+
+      # Draws every page with sample data into PNGs, on the CPU like the real window, without opening one
+      - name: Render the dashboard's pages
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force build\preview | Out-Null
+          foreach ($kind in 'locked', 'searching') {
+            $p = Start-Process driver\questlhsync\bin\win64\QuestLHSync.exe -ArgumentList '--preview', 'build\preview', $kind -Wait -PassThru
+            if ($p.ExitCode -ne 0) { throw "--preview $kind exited with $($p.ExitCode)" }
+          }
+          $n = @(Get-ChildItem build\preview -Filter *.png).Count
+          if ($n -eq 0) { throw 'the dashboard rendered no pages' }
+          "rendered $n pages"
+
+      - name: Upload the page previews
+        uses: actions/upload-artifact@v7
+        with:
+          name: dashboard-preview
+          path: build/preview/
+
+      # frida-inject is downloaded from Frida's release and checked by hash, once per Frida version
+      - name: Cache Frida
+        uses: actions/cache@v6
+        with:
+          path: magisk/frida
+          key: frida-${{ hashFiles('magisk/build_module.py') }}
+          restore-keys: frida-
+
+      - name: Build the Quest module
+        run: python magisk/build_module.py
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Build the Steam Frame package
+        run: python frame/build.py
+
+      - name: Package the release
+        if: inputs.version != ''
+        run: python lhs/package.py "v$LHS_VERSION" "$GITHUB_REPOSITORY"
+
+      - name: Upload the release
+        if: inputs.version != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: release
+          path: out/lhs-release/
+          if-no-files-found: error
+
+      - name: Upload the development build
+        if: inputs.version == ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: LighthouseSync-dev-${{ github.run_number }}
+          path: |
+            driver/questlhsync/
+            out/QuestLHSync-quest-module-*.zip
+            out/QuestLHSync-frame-*.tar.gz
+          if-no-files-found: error
