@@ -25,9 +25,17 @@ cl /nologo /LD /O2 /EHsc /std:c++17 /MT /W3 /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_
 del %OUT%\driver_questlhsync.exp %OUT%\driver_questlhsync.lib 2>nul
 echo built %OUT%\driver_questlhsync.dll
 :overlay
-cl /nologo /utf-8 /O2 /EHsc /std:c++17 /MT /W3 /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DUNICODE /D_UNICODE /D_CRT_SECURE_NO_WARNINGS ^
-  /I%OVR%\headers /Fobuild\overlay\ src\overlay\overlay_main.cpp ^
-  /Fe:%OUT%\QuestLHSync.exe /link /NOLOGO /SUBSYSTEM:WINDOWS %OVR%\lib\win64\openvr_api.lib gdi32.lib user32.lib shell32.lib d3d11.lib dxgi.lib || exit /b 1
+rem LighthouseSync's dashboard (src\dashboard, Dear ImGui) in place of upstream's src\overlay, same file name
+if not exist build\imgui mkdir build\imgui
+set IMGUI_DEFS=/DIMGUI_DISABLE_DEMO_WINDOWS /DIMGUI_DISABLE_DEBUG_TOOLS
+cl /nologo /c /utf-8 /O2 /EHsc /std:c++17 /MT /W3 /DNDEBUG %IMGUI_DEFS% /Ithird_party\imgui /Fobuild\imgui\ ^
+  third_party\imgui\imgui.cpp third_party\imgui\imgui_draw.cpp third_party\imgui\imgui_tables.cpp third_party\imgui\imgui_widgets.cpp || exit /b 1
+cl /nologo /utf-8 /O2 /EHsc /std:c++17 /permissive- /MT /W3 /DNDEBUG /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DUNICODE /D_UNICODE /D_CRT_SECURE_NO_WARNINGS %IMGUI_DEFS% ^
+  /I%OVR%\headers /Ithird_party\imgui /Isrc\common /Fobuild\overlay\ ^
+  src\dashboard\dashboard_main.cpp src\dashboard\ui.cpp src\dashboard\theme.cpp src\dashboard\swr.cpp src\dashboard\preview.cpp ^
+  src\dashboard\ble_win.cpp src\dashboard\updater_win.cpp build\imgui\*.obj ^
+  /Fe:%OUT%\QuestLHSync.exe /link /NOLOGO /SUBSYSTEM:WINDOWS %OVR%\lib\win64\openvr_api.lib gdi32.lib user32.lib shell32.lib ^
+  d3d11.lib dxgi.lib dwmapi.lib winhttp.lib bcrypt.lib windowsapp.lib || exit /b 1
 copy /y %OVR%\bin\win64\openvr_api.dll %OUT%\ >nul
 echo built %OUT%\QuestLHSync.exe
 if /i "%1"=="overlay" exit /b 0
