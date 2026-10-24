@@ -4,7 +4,7 @@
 // The pages are ui.cpp's, drawn by Dear ImGui into pixels on the CPU (swr.cpp): one ImGui context for the window and
 // one for the SteamVR page, sharing the fonts.
 //   QuestLHSync.exe --preview <dir> [locked|acquiring|searching|stale] [width height scale]   sample pages as PNGs
-//   QuestLHSync.exe --icon <file.png>                                                       the icon
+//   QuestLHSync.exe --icon <file.png> [size]                     the icon (lhs/make_icon.py makes lhs/icon.ico)
 //   QuestLHSync.exe --selftest <file.txt>     checks what it can without showing anything or touching SteamVR
 #include <windows.h>
 #include <windowsx.h>
@@ -1172,7 +1172,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     app.atlas = IM_NEW(ImFontAtlas)();
     ui::LoadFonts(app.atlas);
     app.desk_ctx = app.MakeContext();
-    swr::Image img = app.Icon(256);
+    swr::Image img = app.Icon(std::clamp(atoi(Arg(argv, argc, 3, "256").c_str()), 16, 1024));
     return WritePng(Arg(argv, argc, 2, "icon.png").c_str(), img) ? 0 : 1;
   }
 
