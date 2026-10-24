@@ -181,7 +181,7 @@ function Install {
     }
     [IO.File]::WriteAllText($State, "{`"version`":`"$($rel.tag_name)`"}")
     Say "Installed LighthouseSync $($rel.tag_name) in $Driver" Green
-    if (SteamVrRunning) { Say "Restart SteamVR to load it." Yellow } else { Say "Start SteamVR. The LighthouseSync window opens with it and updates itself from now on." }
+    if (SteamVrRunning) { Say "Restart SteamVR to load it." Yellow } else { Say "Start SteamVR. The LighthouseSync window opens with it, and its Updates page offers new versions." }
   } finally {
     Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
   }
