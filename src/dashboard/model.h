@@ -1,6 +1,6 @@
 // LighthouseSync dashboard: what the pages show (Model) and what they can ask for (Actions). Filled by the Windows
-// dashboard from the driver's shared memory, SteamVR, Bluetooth, GitHub and the headset's panel. The headset's panel
-// shows the same pages, drawn on the PC (src/common/lhs_panel.h). No platform headers here.
+// dashboard from the driver's shared memory, SteamVR, Bluetooth, GitHub and the headset's panel (its updater, through
+// src/common/lhs_panel.h). No platform headers here.
 #pragma once
 #include <stdint.h>
 
@@ -121,7 +121,7 @@ struct Actions {
   virtual void OpenDataFolder() = 0;
   virtual void OpenUrl(const std::string &url) = 0;
   virtual void Copy(const std::string &text) = 0;
-  // VR only: the SteamVR keyboard for a text setting (the headset's on its panel); the result goes to SetSetting(key)
+  // VR only: the SteamVR keyboard for a text setting; the result goes to SetSetting(key)
   virtual void EditText(const char *key, const std::string &title, const std::string &value) = 0;
 };
 

@@ -1,14 +1,13 @@
-// lighthousesync-panel: LighthouseSync's page in the Steam Frame's SteamVR dashboard. It shows the PC dashboard's pages,
-// which the PC draws for it and sends over the panel link (src/common/lhs_panel.h), and sends the pointer and the
-// keyboard's text back, so everything runs on the PC as it does from the PC's own SteamVR dashboard. With no PC
-// dashboard to show it shows its own page (panel_ui.cpp): lhsyncd and the headset's updater.
+// lighthousesync-panel: LighthouseSync's page in the Steam Frame's SteamVR dashboard, all from the headset itself
+// (panel_ui.cpp): whether a PC is synced with lhsyncd, lhsyncd's log, the headset's updater and its settings. The PC's
+// dashboard connects to it over the panel link (src/common/lhs_panel.h) only for the updater, for its Updates page.
 // lhs/install-frame.sh installs it with a systemd user unit that runs it alongside the headset's SteamVR, and a
 // launcher for the SteamVR dashboard's "Launch program", which opens the panel when it's already running.
 //   lighthousesync-panel             the panel (exits 3 after opening the one already running)
 //   lighthousesync-panel --version
 //   lighthousesync-panel --probe     whether the headset's SteamVR has the panel, without changing anything
-//   lighthousesync-panel --pretend-visible [file]   for working on the link: acts as if it's open in the dashboard,
-//                                    and writes the PC's last page to file (RGBA) when it exits
+//   lighthousesync-panel --page <file>   the page as it is now, as RGBA pixels into file, and how long it takes to
+//                                    draw, without SteamVR: safe alongside the running panel
 #include <arpa/inet.h>
 #include <dirent.h>
 #include <errno.h>
@@ -43,10 +42,6 @@
 #include "theme.h"
 #include "vk.h"
 
-#define QOI_IMPLEMENTATION
-#define QOI_NO_STDIO
-#include "../../third_party/qoi/qoi.h"
-
 extern char **environ;
 
 namespace lhs {
@@ -54,13 +49,12 @@ namespace lhs {
 namespace {
 
 const char *const kKey = "lighthousesync.panel";
-const float kWidthM = 2.4f;  // as the PC's SteamVR page
-const float kScale = 1.45f;  // its interface size
+const int kW = 1600, kH = 1000;  // the page's pixels
+const float kWidthM = 2.4f;      // as the PC's SteamVR page
+const float kScale = 1.45f;      // its interface size
 const int kDaemonPort = 47280, kDiscoveryPort = 47281;
 
 volatile sig_atomic_t g_quit = 0, g_show = 0;
-bool g_pretend = false;  // --pretend-visible
-std::string g_dump;
 
 void OnQuit(int) { g_quit = 1; }
 void OnShow(int) { g_show = 1; }
@@ -126,12 +120,20 @@ std::string Ip(uint32_t a) {
   return b;
 }
 
-pid_t Spawn(std::initializer_list<const char *> args) {
+// stdout_fd: where the child's output goes (its errors go nowhere then), -1 for the panel's own
+pid_t Spawn(std::initializer_list<const char *> args, int stdout_fd = -1) {
   std::vector<char *> argv;
   for (const char *a : args) argv.push_back((char *)a);
   argv.push_back(nullptr);
+  posix_spawn_file_actions_t fa;
+  posix_spawn_file_actions_init(&fa);
+  if (stdout_fd >= 0) {
+    posix_spawn_file_actions_adddup2(&fa, stdout_fd, 1);
+    posix_spawn_file_actions_addopen(&fa, 2, "/dev/null", O_WRONLY, 0);
+  }
   pid_t pid = -1;
-  if (posix_spawnp(&pid, argv[0], nullptr, nullptr, argv.data(), environ)) return -1;
+  if (posix_spawnp(&pid, argv[0], &fa, nullptr, argv.data(), environ)) pid = -1;
+  posix_spawn_file_actions_destroy(&fa);
   return pid;
 }
 
@@ -158,35 +160,34 @@ struct Panel : panel_ui::Actions {
   vr::VROverlayHandle_t main = vr::k_ulOverlayHandleInvalid, thumb = vr::k_ulOverlayHandleInvalid;
   vk::Device dev;
   vk::Texture tex, thumb_tex;
-  bool vr_up = false, visible = false, keyboard = false;
+  bool vr_up = false, visible = false;
   int vrserver = -1;
 
-  // the PC
+  // the PC's dashboard
   int lfd = -1, cfd = -1;
-  bool hello = false, pc_frame = false;
-  std::string in, out;
-  double accepted = 0, last_rx = 0, last_tx = 0;
-  swr::Image fb;  // the PC's page as far as it has sent it
-  std::string other_version;
-  double other_until = 0;
+  bool hello = false;
+  std::string in, out, pc_version, status_sent;
+  double accepted = 0, last_rx = 0, last_tx = 0, other_until = 0;
 
   // what the headset knows
   int udp = -1;
   panel_ui::State st;
   std::vector<uint32_t> peers;
-  double started = 0, peers_since = 0, refreshed = -100, daemon_seen = 0;
-  std::string status_sent;
-  pid_t check_pid = -1;
+  double started = 0, refreshed = -100, daemon_seen = 0;
+  pid_t check_pid = -1, auto_pid = -1;
 
-  // its own page
+  // lhsyncd's journal, read while the page is open
+  int log_fd = -1;
+  std::string log_in, log_text;
+  double log_asked = -100;
+
+  // the page
   ImFontAtlas *atlas = nullptr;
   ImGuiContext *ctx = nullptr;
-  swr::Image local;
-  double local_drawn = -1, local_input = -100;
-  bool local_dirty = true;
+  swr::Image page;
+  double drawn = -1, input = -100;
+  bool dirty = true;
   float applied = 0;
-
-  bool ShowingPc() const { return cfd >= 0 && hello && pc_frame; }
 
   // ---------------------------------------------------------------- SteamVR
 
@@ -212,9 +213,9 @@ struct Panel : panel_ui::Actions {
     o->SetOverlayWidthInMeters(main, kWidthM);
     o->SetOverlayInputMethod(main, vr::VROverlayInputMethod_Mouse);
     o->SetOverlayFlag(main, vr::VROverlayFlags_SendVRSmoothScrollEvents, true);
-    vr::HmdVector2_t scale{(float)panel::kW, (float)panel::kH};
+    vr::HmdVector2_t scale{(float)kW, (float)kH};
     o->SetOverlayMouseScale(main, &scale);
-    if (!tex.Create(dev, panel::kW, panel::kH, err)) {
+    if (!tex.Create(dev, kW, kH, err)) {
       fprintf(stderr, "the panel's texture: %s\n", err.c_str());
       return false;
     }
@@ -245,73 +246,43 @@ struct Panel : panel_ui::Actions {
     dev.Destroy();
   }
 
-  void Upload(const swr::Image &img) {
+  void Upload() {
     std::string err;
-    if (!tex.Set(main, img.px.data(), err)) fprintf(stderr, "the panel: %s\n", err.c_str());
+    if (!tex.Set(main, page.px.data(), err)) fprintf(stderr, "the panel: %s\n", err.c_str());
   }
 
-  void Pointer(uint8_t kind, uint8_t button, float x, float y) {
-    if (ShowingPc()) {
-      panel::Mouse m{kind, button, 0, x, y};
-      Put(panel::kMouse, &m, sizeof m);
-      return;
-    }
-    ImGui::SetCurrentContext(ctx);
-    ImGuiIO &io = ImGui::GetIO();
-    switch (kind) {
-      case panel::kMove: io.AddMousePosEvent(x, y); break;
-      case panel::kDown:
-      case panel::kUp:
-        io.AddMousePosEvent(x, y);
-        io.AddMouseButtonEvent(button, kind == panel::kDown);
-        break;
-      case panel::kScroll: io.AddMouseWheelEvent(x, y); break;
-      default: io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
-    }
-    local_input = Now();
-  }
-
-  void KeyboardDone() {  // it comes both as an overlay event and a global one
-    if (!keyboard) return;
-    keyboard = false;
-    char b[256] = "";
-    vr::VROverlay()->GetKeyboardText(b, sizeof b);
-    Put(panel::kText, b, (uint32_t)strlen(b));
-  }
-
-  void VrEvents() {
+  void VrEvents(double now) {
     vr::VREvent_t ev;
     while (vr::VRSystem()->PollNextEvent(&ev, sizeof ev)) {
       if (ev.eventType == vr::VREvent_Quit) {
         vr::VRSystem()->AcknowledgeQuit_Exiting();
         g_quit = 1;
-      } else if (ev.eventType == vr::VREvent_KeyboardDone) {
-        KeyboardDone();
-      } else if (ev.eventType == vr::VREvent_KeyboardClosed) {
-        keyboard = false;
       }
     }
+    ImGui::SetCurrentContext(ctx);
+    ImGuiIO &io = ImGui::GetIO();
     while (vr::VROverlay()->PollNextOverlayEvent(main, &ev, sizeof ev)) {
-      float x = ev.data.mouse.x, y = panel::kH - ev.data.mouse.y;  // SteamVR's y is from the bottom
-      uint8_t button = ev.data.mouse.button == vr::VRMouseButton_Right ? 1 : 0;
+      float x = ev.data.mouse.x, y = kH - ev.data.mouse.y;  // SteamVR's y is from the bottom
       switch (ev.eventType) {
-        case vr::VREvent_MouseMove: Pointer(panel::kMove, 0, x, y); break;
+        case vr::VREvent_MouseMove: io.AddMousePosEvent(x, y); break;
         case vr::VREvent_MouseButtonDown:
         case vr::VREvent_MouseButtonUp:
-          if (ev.data.mouse.button == vr::VRMouseButton_Middle) break;
-          Pointer(ev.eventType == vr::VREvent_MouseButtonDown ? panel::kDown : panel::kUp, button, x, y);
+          if (ev.data.mouse.button == vr::VRMouseButton_Middle) continue;
+          io.AddMousePosEvent(x, y);
+          io.AddMouseButtonEvent(ev.data.mouse.button == vr::VRMouseButton_Right ? 1 : 0,
+                                 ev.eventType == vr::VREvent_MouseButtonDown);
           break;
         case vr::VREvent_ScrollSmooth:
-        case vr::VREvent_ScrollDiscrete: Pointer(panel::kScroll, 0, ev.data.scroll.xdelta, ev.data.scroll.ydelta); break;
-        case vr::VREvent_FocusLeave: Pointer(panel::kLeave, 0, 0, 0); break;
-        case vr::VREvent_KeyboardDone: KeyboardDone(); break;
-        case vr::VREvent_KeyboardClosed: keyboard = false; break;
-        default: break;
+        case vr::VREvent_ScrollDiscrete: io.AddMouseWheelEvent(ev.data.scroll.xdelta, ev.data.scroll.ydelta); break;
+        case vr::VREvent_FocusLeave: io.AddMousePosEvent(-FLT_MAX, -FLT_MAX); break;
+        default: continue;
       }
+      input = now;
+      dirty = true;
     }
   }
 
-  // ---------------------------------------------------------------- the PC
+  // ---------------------------------------------------------------- the PC's dashboard
 
   void Listen() {
     int s = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0), on = 1;
@@ -350,14 +321,13 @@ struct Panel : panel_ui::Actions {
 
   void CloseClient() {
     if (cfd < 0) return;
-    if (pc_frame) fprintf(stderr, "showing its own page\n");
     close(cfd);
     cfd = -1;
-    hello = pc_frame = keyboard = false;
+    hello = false;
     in.clear();
     out.clear();
     status_sent.clear();
-    local_dirty = true;
+    dirty = true;
   }
 
   void Put(uint8_t type, const void *p, uint32_t n) {
@@ -405,24 +375,6 @@ struct Panel : panel_ui::Actions {
     in.erase(0, at);
   }
 
-  void Rect(const char *p, uint32_t n) {
-    if (n <= sizeof(panel::Rect)) return;
-    panel::Rect r;
-    memcpy(&r, p, sizeof r);
-    if (!r.w || !r.h || r.x + r.w > panel::kW || r.y + r.h > panel::kH) return;
-    // its size before decoding: qoi_decode allocates whatever the header says, up to gigabytes
-    const uint8_t *q = (const uint8_t *)p + sizeof r;
-    auto be32 = [](const uint8_t *b) { return (uint32_t)b[0] << 24 | b[1] << 16 | b[2] << 8 | b[3]; };
-    if (n - sizeof r < 14 || be32(q + 4) != r.w || be32(q + 8) != r.h) return;
-    qoi_desc d;
-    uint8_t *px = (uint8_t *)qoi_decode(p + sizeof r, (int)(n - sizeof r), &d, 4);
-    if (!px) return;
-    if (d.width == r.w && d.height == r.h)
-      for (int y = 0; y < r.h; y++)
-        memcpy(&fb.px[(size_t)(r.y + y) * fb.w + r.x], px + (size_t)y * r.w * 4, (size_t)r.w * 4);
-    free(px);
-  }
-
   void Handle(uint8_t type, const char *p, uint32_t n, double now) {
     if (type == panel::kHello) {
       std::string text(p, n);
@@ -434,41 +386,33 @@ struct Panel : panel_ui::Actions {
       Put(panel::kHello, mine.data(), (uint32_t)mine.size());
       if (proto != panel::kProto) {  // another LighthouseSync: tell it, and say so on the page
         Flush();
-        other_version = version;
         other_until = now + 330;  // it tries again in 300 s
         fprintf(stderr, "the PC's link is version %d (%s), this panel's %d\n", proto, version, panel::kProto);
         CloseClient();
         return;
       }
       hello = true;
+      pc_version = version;
       other_until = 0;
-      uint8_t v = visible;
-      Put(panel::kVisible, &v, 1);
-      local_dirty = true;
+      SendStatus();
+      dirty = true;
       return;
     }
     if (!hello) return;
     switch (type) {
-      case panel::kRect: Rect(p, n); break;
-      case panel::kPresent:
-        if (!pc_frame) {
-          local_dirty = true;
-          fprintf(stderr, "showing the PC's dashboard\n");
-        }
-        pc_frame = true;
-        if (visible) Upload(fb);
-        break;
-      case panel::kKeyboard: {
-        std::string title(p, strnlen(p, n)), value = title.size() < n ? std::string(p + title.size() + 1, n - title.size() - 1) : "";
-        keyboard = vr::VROverlay()->ShowKeyboardForOverlay(main, vr::k_EGamepadTextInputModeNormal,
-                                                           vr::k_EGamepadTextInputLineModeSingleLine,
-                                                           vr::KeyboardFlag_Minimal | vr::KeyboardFlag_Modal,
-                                                           title.c_str(), 255, value.c_str(), 0) == vr::VROverlayError_None;
-        break;
-      }
       case panel::kCheck: Check(); break;
       case panel::kInstall: Install(); break;
-      default: break;  // kPing, and what a newer PC adds
+      default: break;  // kPing, v1.26.3's page images and keyboard, and what a newer PC adds
+    }
+  }
+
+  void SendStatus() {
+    std::string s = "installed=" + st.installed + "\nstaged=" + st.staged + "\nauto=" + (st.auto_update ? "1" : "0") +
+                    "\nchecking=" + (st.checking ? "1" : "0") + "\nchecked=" + std::to_string((long long)st.checked) +
+                    "\nresult=" + st.result + "\n";
+    if (hello && s != status_sent) {
+      Put(panel::kStatus, s.data(), (uint32_t)s.size());
+      status_sent = s;
     }
   }
 
@@ -484,6 +428,7 @@ struct Panel : panel_ui::Actions {
       char serial[128] = "", model[128] = "", state[32] = "";
       if (sscanf(b, "QLHS %d %127s %d %127s %31s", &v, serial, &port, model, state) != 5) continue;
       std::replace(model, model + strlen(model), '_', ' ');  // lhsyncd sends spaces as underscores
+      if (st.serial != serial || st.model != model || st.daemon_state != state) dirty = true;
       st.serial = serial;
       st.model = model;
       st.daemon_state = state;
@@ -493,9 +438,7 @@ struct Panel : panel_ui::Actions {
 
   void Refresh(double now) {
     refreshed = now;
-    if (lfd < 0) Listen();
     peers = DaemonPeers();
-    peers_since = peers.empty() ? 0 : peers_since ? peers_since : now;
     st.pcs.clear();
     for (uint32_t a : peers) st.pcs.push_back(Ip(a));
     if (udp >= 0) {
@@ -506,50 +449,36 @@ struct Panel : panel_ui::Actions {
       sendto(udp, "QLHS?", 5, MSG_DONTWAIT, (sockaddr *)&a, sizeof a);
     }
     st.daemon = daemon_seen > 0 ? now - daemon_seen < 5 : now - started < 3;  // its first answer is on its way
+    st.pc_app = cfd >= 0 && hello ? pc_version : "";
+    st.pc_other = now < other_until && !peers.empty();
 
     st.installed = Line(lhs + "/version");
     st.staged = Line(lhs + "/staged/version");
     st.updater = Exists(units + "/lighthousesync-update.service");
-    st.auto_update = Exists(units + "/timers.target.wants/lighthousesync-update.timer");
+    if (auto_pid <= 0) st.auto_update = Exists(units + "/timers.target.wants/lighthousesync-update.timer");
     std::vector<std::string> c = Lines(lhs + "/checked", 2);  // install-frame.sh --stage: when, and what came of it
     st.checked = c.size() > 0 ? atof(c[0].c_str()) : 0;
     st.result = c.size() > 1 ? c[1] : "";
     st.checking = check_pid > 0;
-    Link(now);
-
-    std::string s = "installed=" + st.installed + "\nstaged=" + st.staged + "\nauto=" + (st.auto_update ? "1" : "0") +
-                    "\nchecking=" + (st.checking ? "1" : "0") + "\nchecked=" + std::to_string((long long)st.checked) +
-                    "\nresult=" + st.result + "\n";
-    if (hello && s != status_sent) {
-      Put(panel::kStatus, s.data(), (uint32_t)s.size());
-      status_sent = s;
-    }
-  }
-
-  void Link(double now) {
-    int l = panel_ui::kNoPc;
-    if (cfd >= 0 && hello) l = panel_ui::kLinked;
-    else if (now < other_until && !peers.empty()) l = panel_ui::kOtherProto;
-    else if (!peers.empty()) l = now - std::max(peers_since, started) < 20 ? panel_ui::kConnecting : panel_ui::kNoLink;
-    st.link = l;
-    st.pc_version = other_version;
+    SendStatus();
   }
 
   void Reap(double now) {
     int status;
-    for (pid_t pid; (pid = waitpid(-1, &status, WNOHANG)) > 0;)
-      if (pid == check_pid) {
-        check_pid = -1;
-        Refresh(now);
-        local_dirty = true;
-      }
+    for (pid_t pid; (pid = waitpid(-1, &status, WNOHANG)) > 0;) {
+      if (pid == check_pid) check_pid = -1;
+      else if (pid == auto_pid) auto_pid = -1;
+      else continue;  // journalctl, systemctl restart, systemd-run
+      Refresh(now);
+      dirty = true;
+    }
   }
 
   void Check() override {
     if (check_pid > 0 || !st.updater) return;
     check_pid = Spawn({"systemctl", "--user", "start", "lighthousesync-update.service"});
     Refresh(Now());
-    local_dirty = true;
+    dirty = true;
   }
 
   // install-frame.sh --apply, which restarts the headset's SteamVR and this with it, in a unit of its own: not
@@ -567,13 +496,92 @@ struct Panel : panel_ui::Actions {
     daemon_seen = Now();  // a few seconds to come back before it says it isn't answering
   }
 
-  // ---------------------------------------------------------------- its own page
+  // what install-frame.sh turns on and off, but its units stay, for Check now. Not --now for the apply service: with a
+  // release downloaded, that would install it, and restart SteamVR, right away
+  void SetAutoUpdate(bool on) override {
+    if (!st.updater || auto_pid > 0) return;
+    auto_pid = Spawn({"sh", "-c",
+                      on ? "systemctl --user enable --now lighthousesync-update.timer; "
+                           "systemctl --user enable lighthousesync-apply.service"
+                         : "systemctl --user disable --now lighthousesync-update.timer; "
+                           "systemctl --user disable lighthousesync-apply.service"});
+    if (auto_pid > 0) st.auto_update = on;  // Refresh reads it back once it's done
+    dirty = true;
+  }
 
-  void DrawLocal(double now) {
+  // ---------------------------------------------------------------- lhsyncd's journal
+
+  void LogStart() {
+    int p[2];
+    if (log_fd >= 0 || pipe2(p, O_CLOEXEC)) return;
+    pid_t pid = Spawn({"journalctl", "--user", "--unit=questlhsync.service", "--boot=0", "--lines=40",
+                       "--output=short-iso", "--no-hostname", "--no-pager", "--quiet"},
+                      p[1]);
+    close(p[1]);
+    if (pid < 0) {
+      close(p[0]);
+      return;
+    }
+    fcntl(p[0], F_SETFL, O_NONBLOCK);
+    log_fd = p[0];
+    log_in.clear();
+    log_asked = Now();
+  }
+
+  void LogRead() {
+    char b[16384];
+    for (;;) {
+      ssize_t k = read(log_fd, b, sizeof b);
+      if (k > 0) {
+        if (log_in.size() < (1u << 20)) log_in.append(b, (size_t)k);
+        continue;
+      }
+      if (k < 0 && (errno == EAGAIN || errno == EINTR)) return;
+      break;
+    }
+    close(log_fd);
+    log_fd = -1;
+    if (log_in == log_text) return;
+    log_text = log_in;
+    // "2026-10-24T01:43:00-05:00 lhsyncd[1899]: I lhsyncd: lhsight started"
+    st.log.clear();
+    for (size_t at = 0; at < log_text.size();) {
+      size_t e = log_text.find('\n', at);
+      if (e == std::string::npos) e = log_text.size();
+      std::string l = log_text.substr(at, e - at);
+      at = e + 1;
+      size_t c = l.find("]: ");
+      if (l.size() < 19 || l[10] != 'T' || c == std::string::npos) continue;
+      panel_ui::LogLine x;
+      x.time = l.substr(11, 8);
+      x.text = l.substr(c + 3, 300);
+      auto starts = [&](const char *p) { return x.text.compare(0, strlen(p), p) == 0; };
+      size_t sd = l.find(" systemd[");
+      if (sd != std::string::npos && sd < c) {  // the service's own lines, with its long description
+        const char *unit = "questlhsync.service: ";
+        if (starts("Started ")) x.text = "Service started";
+        else if (starts("Stopping ")) x.text = "Service stopping";
+        else if (starts("Stopped ")) x.text = "Service stopped";
+        else if (starts("Failed to start ")) x.text = "Service failed to start", x.level = 2;
+        else if (starts(unit) && x.text.find("Consumed ") != std::string::npos) continue;
+        else if (starts(unit)) x.text.erase(0, strlen(unit)), x.level = 1;
+      } else if (x.text.size() > 2 && x.text[1] == ' ' && strchr("IWE", x.text[0])) {  // lhsyncd's and lhsight's
+        x.level = x.text[0] == 'E' ? 2 : x.text[0] == 'W' ? 1 : 0;
+        x.text.erase(0, 2);
+        if (starts("lhsyncd: ")) x.text.erase(0, 9);
+      }
+      st.log.push_back(x);
+    }
+    dirty = true;
+  }
+
+  // ---------------------------------------------------------------- the page
+
+  void Draw(double now) {
     ImGui::SetCurrentContext(ctx);
     ImGuiIO &io = ImGui::GetIO();
-    io.DisplaySize = ImVec2((float)panel::kW, (float)panel::kH);
-    io.DeltaTime = local_drawn > 0 ? (float)std::clamp(now - local_drawn, 0.001, 1.0) : 1.f / 60;
+    io.DisplaySize = ImVec2((float)kW, (float)kH);
+    io.DeltaTime = drawn > 0 ? (float)std::clamp(now - drawn, 0.001, 1.0) : 1.f / 60;
     if (applied != kScale) {
       ui::ApplyStyle(kScale);
       applied = kScale;
@@ -583,12 +591,16 @@ struct Panel : panel_ui::Actions {
     panel_ui::Draw(st, *this);
     ImGui::Render();
     swr::UpdateTextures(ImGui::GetDrawData());
-    swr::Render(ImGui::GetDrawData(), local, ui::col::bg);
-    local_drawn = now;
-    local_dirty = false;
+    swr::Render(ImGui::GetDrawData(), page, ui::col::bg);
+    drawn = now;
+    dirty = false;
   }
 
-  void MakeContext() {
+  void Setup() {
+    started = Now();
+    std::string home = Env("HOME", "/home/steamos");
+    lhs = home + "/.local/share/questlhsync/lhs";
+    units = Env("XDG_CONFIG_HOME", home + "/.config") + "/systemd/user";
     atlas = IM_NEW(ImFontAtlas)();
     ui::LoadFonts(atlas);
     ctx = ImGui::CreateContext(atlas);
@@ -601,34 +613,35 @@ struct Panel : panel_ui::Actions {
     io.ConfigErrorRecoveryEnableAssert = false;
     io.ConfigErrorRecoveryEnableTooltip = false;
     io.ConfigDebugHighlightIdConflicts = false;
-    local.Resize(panel::kW, panel::kH);
-    fb.Resize(panel::kW, panel::kH);
+    page.Resize(kW, kH);
+    udp = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
   }
 
   // ---------------------------------------------------------------- the loop
 
   int Run() {
-    started = Now();
-    std::string home = Env("HOME", "/home/steamos");
-    lhs = home + "/.local/share/questlhsync/lhs";
-    units = Env("XDG_CONFIG_HOME", home + "/.config") + "/systemd/user";
-    MakeContext();
+    Setup();
     if (!StartVr()) {
       StopVr();
       return 1;
     }
-    udp = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    Listen();
     Refresh(Now());
-    DrawLocal(Now());  // an image from the start: the dashboard doesn't open an overlay without one
-    Upload(local);
+    Draw(Now());  // an image from the start: the dashboard doesn't open an overlay without one
+    Upload();
     double alive_checked = 0;
     while (!g_quit) {
-      pollfd pf[3] = {{lfd, POLLIN, 0}, {cfd, (short)(POLLIN | (out.empty() ? 0 : POLLOUT)), 0}, {udp, POLLIN, 0}};
-      poll(pf, 3, visible ? 11 : 100);
+      bool busy = Now() - input < 0.5;
+      pollfd pf[4] = {{lfd, POLLIN, 0},
+                      {cfd, (short)(POLLIN | (out.empty() ? 0 : POLLOUT)), 0},
+                      {udp, POLLIN, 0},
+                      {log_fd, POLLIN, 0}};
+      poll(pf, 4, !visible ? 100 : busy ? 4 : 16);  // SteamVR's pointer has nothing to wait on
       double now = Now();
       if (lfd >= 0 && (pf[0].revents & POLLIN)) Accept(now);
       if (cfd >= 0 && pf[1].revents) Read(now);
       if (udp >= 0 && (pf[2].revents & POLLIN)) Discovery();
+      if (log_fd >= 0 && pf[3].revents) LogRead();
 
       if (now - alive_checked > 1) {
         alive_checked = now;
@@ -637,7 +650,7 @@ struct Panel : panel_ui::Actions {
           break;
         }
       }
-      VrEvents();
+      VrEvents(now);
       if (g_show) {
         g_show = 0;
         vr::VROverlay()->ShowDashboard(kKey);
@@ -649,34 +662,56 @@ struct Panel : panel_ui::Actions {
         else if (now - last_tx > 5) Put(panel::kPing, nullptr, 0);
       }
       Reap(now);
-      if (now - refreshed > 2) Refresh(now);  // the page redraws every second anyway
+      if (now - refreshed > (visible ? 1 : 2)) {
+        if (lfd < 0) Listen();
+        Refresh(now);
+      }
 
-      bool v = g_pretend || vr::VROverlay()->IsOverlayVisible(main);
+      bool v = vr::VROverlay()->IsOverlayVisible(main);
       if (v != visible) {
         visible = v;
-        uint8_t b = v;
-        Put(panel::kVisible, &b, 1);
-        local_dirty = true;
-        if (v && ShowingPc()) Upload(fb);
+        dirty = true;
       }
-      if (visible && !ShowingPc()) {
-        bool busy = now - local_input < 0.5;
-        if (local_dirty || now - local_drawn > (busy ? 1.0 / 30 : 1.0)) {
-          Link(now);
-          DrawLocal(now);
-          Upload(local);
+      if (visible) {
+        if (now - log_asked > 2) LogStart();
+        // at once for the pointer, then while it settles, and every second for what changes by itself
+        if (dirty || now - drawn > (busy ? 1.0 / 60 : 1.0)) {
+          Draw(now);
+          Upload();
         }
       }
       Flush();
     }
-    if (!g_dump.empty()) {
-      if (FILE *f = fopen(g_dump.c_str(), "wb")) {
-        fwrite(fb.px.data(), 4, fb.px.size(), f);
-        fclose(f);
-      }
-    }
     if (cfd >= 0) CloseClient();
     StopVr();
+    return 0;
+  }
+
+  // --page: as Run draws it, without SteamVR or the PC's dashboard
+  int Page(const std::string &path) {
+    Setup();
+    Refresh(Now());
+    LogStart();
+    for (double end = Now() + 0.5; Now() < end;) {
+      pollfd pf[2] = {{udp, POLLIN, 0}, {log_fd, POLLIN, 0}};
+      poll(pf, 2, 20);
+      if (udp >= 0 && (pf[0].revents & POLLIN)) Discovery();
+      if (log_fd >= 0 && pf[1].revents) LogRead();
+    }
+    Reap(Now());
+    Refresh(Now());
+    const int n = 30;
+    double t0 = Now();
+    for (int i = 0; i < n; i++) Draw(Now());
+    double ms = (Now() - t0) / n * 1000;
+    FILE *f = fopen(path.c_str(), "wb");
+    if (!f) {
+      fprintf(stderr, "can't write %s\n", path.c_str());
+      return 1;
+    }
+    fwrite(page.px.data(), 4, page.px.size(), f);
+    fclose(f);
+    printf("%dx%d RGBA into %s, %.1f ms a frame\n", kW, kH, path.c_str(), ms);
     return 0;
   }
 };
@@ -753,9 +788,9 @@ int main(int argc, char **argv) {
   // desktop mode's terminal points it at a nested session, where systemctl --user finds no systemd
   setenv("XDG_RUNTIME_DIR", ("/run/user/" + std::to_string(getuid())).c_str(), 1);
   if (argc > 1 && !strcmp(argv[1], "--probe")) return Probe();
-  if (argc > 1 && !strcmp(argv[1], "--pretend-visible")) {
-    g_pretend = true;
-    g_dump = argc > 2 ? argv[2] : "";
+  if (argc > 2 && !strcmp(argv[1], "--page")) {
+    static Panel p;
+    return p.Page(argv[2]);
   }
   signal(SIGPIPE, SIG_IGN);
   signal(SIGTERM, OnQuit);
@@ -764,7 +799,7 @@ int main(int argc, char **argv) {
   int lock = -1;
   if (!OnlyOne(lock)) return 3;
   bool systemd = getenv("INVOCATION_ID") != nullptr;
-  if (!systemd && !g_pretend) g_show = 1;  // started from the dashboard's "Launch program": open when ready
+  if (!systemd) g_show = 1;  // started from the dashboard's "Launch program": open when ready
   if (!WaitForSteamVr(systemd)) return 1;
   static Panel p;
   return p.Run();

@@ -44,27 +44,82 @@ void Code(const char *code) {
   ImGui::Dummy(ImVec2(w, h));
 }
 
+// s cut to fit maxw, with an ellipsis
+std::string Fit(const std::string &s, ImFont *f, float size, float maxw) {
+  if (Measure(s.c_str(), f, size).x <= maxw) return s;
+  size_t lo = 0, hi = s.size();  // the longest start that fits with the ellipsis, in whole UTF-8 characters
+  while (lo < hi) {
+    size_t mid = (lo + hi + 1) / 2;
+    while (mid > lo && ((unsigned char)s[mid] & 0xC0) == 0x80) mid--;
+    if (mid == lo) break;
+    if (Measure((s.substr(0, mid) + "\xE2\x80\xA6").c_str(), f, size).x <= maxw) lo = mid;
+    else hi = mid - 1;
+  }
+  return s.substr(0, lo) + "\xE2\x80\xA6";
+}
+
+// the big line at the top, and what it means
+void Status(const State &s, Actions &a, float w) {
+  std::string pc = s.pcs.empty() ? "" : s.pcs[0];
+  const char *title;
+  std::string body;
+  ImU32 tone = col::text;
+  if (!s.daemon) {
+    title = "The camera service isn't answering";
+    body = "lhsyncd sends what the tracking cameras see of the base stations to the PC. Without it the PC can't sync "
+           "with this headset.";
+    tone = col::bad;
+  } else if (s.pcs.empty()) {
+    title = "Waiting for the PC";
+    body = "Start SteamVR on a PC with LighthouseSync, on the same network as this headset. It finds the headset by "
+           "itself.";
+  } else if (s.daemon_state == "capturing") {
+    title = "Synced with the PC";
+    body = F("Sending what the tracking cameras see of the base stations to the PC at %s.", pc.c_str());
+    tone = col::good;
+  } else {
+    title = "Connected to the PC, cameras stopped";
+    body = F("The PC at %s is connected, but the camera reader isn't running. The log says why.", pc.c_str());
+    tone = col::warn;
+  }
+  Text(title, tone, g_fonts.semibold, kTitle);
+  Gap(4);
+  ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::min(w, S(820)));
+  Wrapped(body.c_str(), col::dim, kBody);
+  ImGui::PopTextWrapPos();
+  if (!s.daemon) {
+    Gap(8);
+    if (Button("Restart it", kPrimary)) a.RestartDaemon();
+  }
+}
+
 void Headset(const State &s) {
   CardTitle("This headset");
   KeyValue("Headset", s.model.empty() ? "Unknown" : s.model);
   KeyValue("Serial number", s.serial.empty() ? "Unknown" : s.serial);
-  KeyValue("lhsyncd", !s.daemon                         ? "Not answering"
-                      : s.daemon_state == "capturing" ? "Sending cameras to the PC"
-                                                      : "Waiting for the PC",
+  KeyValue("Camera service", !s.daemon                         ? "Not answering"
+                             : s.daemon_state == "capturing" ? "Sending to the PC"
+                                                             : "Running, cameras stopped",
            s.daemon ? col::text : col::bad);
   KeyValue("PC", s.pcs.empty() ? "None" : Join(s.pcs), s.pcs.empty() ? col::dim : col::text);
+  KeyValue("LighthouseSync on the PC", s.pc_other           ? "Another version"
+                                       : s.pc_app.empty() ? "Not connected"
+                                                          : s.pc_app,
+           s.pc_other ? col::warn : s.pc_app.empty() ? col::dim : col::text);
 }
 
 void Updates(const State &s, Actions &a) {
   CardTitle("Updates");
   KeyValue("Installed", s.installed.empty() ? "Unknown" : s.installed);
-  KeyValue("Automatic updates", s.auto_update ? "On, every 6 hours" : "Off");
   if (s.updater)
     KeyValue("Last checked", s.checking ? "Checking now" : s.checked > 0 ? Ago((double)time(nullptr) - s.checked) : "Not yet");
   if (!s.result.empty() && !s.checking) Text(s.result.c_str(), col::faint, g_fonts.body, kSmall + 0.5f);
   Gap(8);
   if (!s.staged.empty()) {
-    Wrapped(F("%s is downloaded. It installs the next time the headset starts.", s.staged.c_str()).c_str(), col::text);
+    Wrapped((s.auto_update ? F("%s is downloaded. It installs the next time the headset starts.", s.staged.c_str())
+                           : F("%s is downloaded.", s.staged.c_str()))
+                .c_str(),
+            col::text);
     Gap(4);
     if (Button("Install it now", kPrimary)) a.Install();
     Gap(2);
@@ -76,6 +131,46 @@ void Updates(const State &s, Actions &a) {
     Gap(4);
     Code("curl -fsSL https://github.com/" LHS_REPO "/releases/latest/download/install-frame.sh | bash");
   }
+}
+
+void Settings(const State &s, Actions &a) {
+  CardTitle("Settings");
+  SettingBegin("Automatic updates",
+               s.updater ? "Looks for a new release every 6 hours and installs it the next time the headset starts."
+                         : "Installed without them. Run the installer again to turn them on.",
+               S(40));
+  bool on = s.auto_update;
+  if (Toggle("auto_update", &on, s.updater)) a.SetAutoUpdate(on);
+  SettingEnd();
+  Divider();
+  SettingBegin("Camera service", "Restarting lhsyncd reconnects the PC in a few seconds.", ButtonWidth("Restart"));
+  if (Button("Restart")) a.RestartDaemon();
+  SettingEnd();
+}
+
+// lhsyncd's last lines, as many as fit in height
+void Log(const State &s, float height) {
+  CardTitle("Camera service log");
+  ImDrawList *dl = ImGui::GetWindowDrawList();
+  float w = InnerWidth(), lh = S(19), tw = Measure("00:00:00", g_fonts.mono, kSmall).x + S(12);
+  int n = std::max(1, (int)(height / lh));
+  if (s.log.empty()) {
+    Text("Nothing yet.", col::faint, g_fonts.body, kSmall + 0.5f);
+    ImGui::Dummy(ImVec2(w, std::max(0.f, n * lh - S(20))));
+    return;
+  }
+  ImVec2 p = ImGui::GetCursorScreenPos();
+  size_t first = s.log.size() > (size_t)n ? s.log.size() - n : 0;
+  ImGui::PushFont(g_fonts.mono, kSmall);
+  for (size_t i = first; i < s.log.size(); i++) {
+    const LogLine &l = s.log[i];
+    float y = p.y + (float)(i - first) * lh;
+    dl->AddText(ImVec2(p.x, y), ImGui::GetColorU32(col::faint), l.time.c_str());
+    ImU32 c = l.level == 2 ? col::bad : l.level == 1 ? col::warn : col::dim;
+    dl->AddText(ImVec2(p.x + tw, y), ImGui::GetColorU32(c), Fit(l.text, g_fonts.mono, kSmall, w - tw).c_str());
+  }
+  ImGui::PopFont();
+  ImGui::Dummy(ImVec2(w, n * lh));
 }
 
 }  // namespace
@@ -94,61 +189,29 @@ void Draw(const State &s, Actions &a) {
   Text("LighthouseSync", col::text, g_fonts.semibold, kHeading);
   const char *version = s.installed.empty() ? LHS_VERSION : s.installed.c_str();
   Text(F("Version %s on this headset", version + (version[0] == 'v')).c_str(), col::faint, g_fonts.body, kSmall);
-  Gap(22);
-
-  std::string pc = s.pcs.empty() ? "" : s.pcs[0];
-  const char *title = "Waiting for the PC";
-  std::string body =
-      "Start SteamVR on the PC with LighthouseSync installed. Its dashboard shows here once it's synced with this "
-      "headset.";
-  ImU32 tone = col::text;
-  switch (s.link) {
-    case kConnecting:
-      title = "Connecting to the PC";
-      body = F("The PC at %s is synced with this headset. Its dashboard shows here in a moment.", pc.c_str());
-      break;
-    case kNoLink:
-      title = "The PC's dashboard isn't connecting";
-      body = F("The PC at %s is synced with this headset, but its dashboard isn't showing here. Check that "
-               "LighthouseSync is running on the PC and up to date. QuestLHSync and older LighthouseSync releases "
-               "don't have the headset panel.",
-               pc.c_str());
-      tone = col::warn;
-      break;
-    case kOtherProto:
-      title = "The PC has a different LighthouseSync";
-      body = F("The PC has LighthouseSync %s, which shows its dashboard here differently. Update the PC and this "
-               "headset to the latest release.",
-               s.pc_version.empty() ? "of another version" : s.pc_version.c_str());
-      tone = col::warn;
-      break;
-    case kLinked:
-      title = "Connected to the PC";
-      body = "Loading its dashboard.";
-      tone = col::good;
-      break;
-    default: break;
-  }
-  Text(title, tone, g_fonts.semibold, kTitle);
-  Gap(4);
-  ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::min(W, S(760)));
-  Wrapped(body.c_str(), col::dim, kBody);
-  ImGui::PopTextWrapPos();
+  Gap(18);
+  Status(s, a, W);
   Gap(18);
 
-  if (!s.daemon) {
-    if (Notice("lhsyncd isn't answering, so the PC can't sync with this headset.", col::bad, "Restart it"))
-      a.RestartDaemon();
-    Gap(8);
-  }
-
-  float gap = S(16), cw = (float)(int)((W - gap) / 2);
+  float gap = S(16), cw = (float)(int)((W - gap) * 0.45f);
   CardsBegin();
   CardBegin(cw);
   Headset(s);
   CardEnd();
   CardBegin(W - cw - gap);
   Updates(s, a);
+  CardEnd();
+  CardsEnd();
+
+  // the log fills what's left: the card's padding and title come off its lines
+  float left = ImGui::GetWindowPos().y + io.DisplaySize.y - S(32) - ImGui::GetCursorScreenPos().y;
+  float lines = left - S(18) * 2 - S(30);
+  CardsBegin();
+  CardBegin(cw);
+  Settings(s, a);
+  CardEnd();
+  CardBegin(W - cw - gap);
+  Log(s, lines);
   CardEnd();
   CardsEnd();
   ImGui::End();

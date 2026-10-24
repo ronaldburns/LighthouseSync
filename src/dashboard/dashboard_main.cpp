@@ -1,8 +1,9 @@
 // QuestLHSync.exe: LighthouseSync's dashboard, a desktop window and a SteamVR dashboard page. The driver starts it
 // each session by upstream's file name and it exits with SteamVR; started by hand while SteamVR isn't running it's a
 // plain window (updates, base stations) that closes like any other.
-// The pages are ui.cpp's, drawn by Dear ImGui into pixels on the CPU (swr.cpp): one ImGui context for the window, one
-// for the SteamVR page and one for the headset's panel (panel_link.h, which sends it the pixels), sharing the fonts.
+// The pages are ui.cpp's, drawn by Dear ImGui into pixels on the CPU (swr.cpp): one ImGui context for the window and one
+// for the SteamVR page, sharing the fonts. The Steam Frame's panel draws its own page; panel_link.h only hears its
+// updater.
 //   QuestLHSync.exe --preview <dir> [locked|acquiring|searching|stale|headset] [width height scale]   sample pages
 //   QuestLHSync.exe --icon <file.png> [size]                     the icon (lhs/make_icon.py makes lhs/icon.ico)
 //   QuestLHSync.exe --selftest <file.txt>     checks what it can without showing anything or touching SteamVR
@@ -381,7 +382,7 @@ struct App : Actions {
   Model m;
   ui::View desk_view, vr_view;
   ImFontAtlas *atlas = nullptr;
-  ImGuiContext *desk_ctx = nullptr, *vr_ctx = nullptr, *remote_ctx = nullptr;
+  ImGuiContext *desk_ctx = nullptr, *vr_ctx = nullptr;
   float desk_applied = 0, vr_applied = 0;  // the scale each context's style was made for
   swr::Image desk_img, vr_img, icon;
   std::vector<uint32_t> bgra;  // desk_img for GDI
@@ -412,33 +413,7 @@ struct App : Actions {
   double log_at = -1, check_at = 0;
   bool woke = false;
 
-  // the headset's panel: the same pages, drawn here at its size and sent to it
-  struct Remote : Actions {  // what its pages ask for, done here as for the others
-    App &a;
-    explicit Remote(App &app) : a(app) {}
-    void Command(int cmd) override { a.Command(cmd); }
-    void SetSetting(const char *key, const std::string &value) override { a.SetSetting(key, value); }
-    void PrefsChanged() override { a.PrefsChanged(); }
-    void Power(const std::string &name, int cmd) override { a.Power(name, cmd); }
-    void Scan() override { a.Scan(); }
-    void CheckUpdates() override { a.CheckUpdates(); }
-    void InstallUpdate() override { a.InstallUpdate(); }
-    void HeadsetCheck() override { a.HeadsetCheck(); }
-    void HeadsetInstall() override { a.HeadsetInstall(); }
-    void OpenDataFolder() override {}  // folders, links and the clipboard are the PC's: the headset view hides them
-    void OpenUrl(const std::string &) override {}
-    void Copy(const std::string &) override {}
-    void EditText(const char *key, const std::string &title, const std::string &value) override {
-      a.remote_kb_key = key;  // the headset's keyboard; its text comes back through the link
-      a.link.Keyboard(title, value);
-    }
-  } remote{*this};
-  PanelLink link;
-  ui::View remote_view;
-  swr::Image remote_img;
-  float remote_applied = 0;
-  double remote_input = -1, remote_drawn = -1;
-  std::string remote_kb_key;
+  PanelLink link;  // the Steam Frame's panel: its updater, for the Updates page
 
   // ---- Actions
   void Command(int cmd) override {
@@ -458,7 +433,7 @@ struct App : Actions {
 
   void PrefsChanged() override {
     SavePrefs(prefs_path, m.prefs);
-    desk_applied = vr_applied = remote_applied = 0;  // the interface size may have changed
+    desk_applied = vr_applied = 0;  // the interface size may have changed
   }
 
   void Power(const std::string &name, int cmd) override { ble::Power(name, cmd); }
@@ -648,35 +623,6 @@ struct App : Actions {
     std::string key = kb_key;
     kb_key.clear();
     KeyboardText(key, b);
-  }
-
-  // the headset's panel: its pointer and keyboard into its context, its updater into the model
-  void TakeRemote() {
-    ImGui::SetCurrentContext(remote_ctx);
-    ImGuiIO &io = ImGui::GetIO();
-    for (const panel::Mouse &e : link.mouse) {
-      switch (e.kind) {
-        case panel::kMove: io.AddMousePosEvent(e.x, e.y); break;
-        case panel::kDown:
-        case panel::kUp:
-          io.AddMousePosEvent(e.x, e.y);
-          io.AddMouseButtonEvent(e.button ? 1 : 0, e.kind == panel::kDown);
-          break;
-        case panel::kScroll: io.AddMouseWheelEvent(e.x, e.y); break;
-        default: io.AddMousePosEvent(-FLT_MAX, -FLT_MAX); break;
-      }
-      remote_input = m.now;
-    }
-    link.mouse.clear();
-    for (const std::string &t : link.texts) {
-      if (remote_kb_key.empty()) continue;
-      std::string key = remote_kb_key;
-      remote_kb_key.clear();
-      KeyboardText(key, t);
-    }
-    link.texts.clear();
-    if (!link.info.connected) remote_kb_key.clear();
-    m.panel = link.info;
   }
 
   void ReadDevices() {
@@ -998,9 +944,7 @@ struct App : Actions {
     ui::LoadFonts(atlas);
     vr_ctx = MakeContext();
     desk_ctx = MakeContext();
-    remote_ctx = MakeContext();
     vr_view.vr = true;
-    remote_view.vr = remote_view.headset = true;
     icon = ui::IconImage(desk_ctx, atlas, 256);
     MakeWindow(inst, !managed || m.prefs.open_window);
     upd::Start(DriverRoot(), data_dir);
@@ -1030,7 +974,10 @@ struct App : Actions {
       if (vr_up) PollVr();
       if (quit) break;
       m.vr = vr_up;
-      if (vr_up && m.now - devices_at >= 0.1) {
+      // the tracking view's devices move with SteamVR's poses: often while it's on screen
+      bool tracking_shown = (desk_view.page == ui::kTracking && hwnd && IsWindowVisible(hwnd) && !IsIconic(hwnd)) ||
+                            (vr_view.page == ui::kTracking && vr_up && vr::VROverlay()->IsOverlayVisible(page.main));
+      if (vr_up && m.now - devices_at >= (tracking_shown ? 1 / 60. : 0.1)) {
         devices_at = m.now;
         ReadDevices();
       }
@@ -1051,26 +998,22 @@ struct App : Actions {
       // the panel on the headset the driver is connected to ("ip:port")
       std::string host = m.have_status && !m.stale ? std::string(m.st.headset_addr, strnlen(m.st.headset_addr, sizeof m.st.headset_addr)) : "";
       link.Poll(m.now, host.substr(0, host.find(':')));
-      TakeRemote();
+      m.panel = link.info;
 
-      // draw what's visible: quickly after input (hover, presses), a few times a second otherwise
+      // draw what's visible: quickly after input (hover, presses), 30 times a second while the tracking view is on
+      // screen (its devices move), a few times a second otherwise
       bool desk_busy = m.now - desk_input < 0.6, vr_busy = m.now - vr_input < 0.6;
+      double desk_every = desk_busy ? 1 / 60. : desk_view.page == ui::kTracking ? 1 / 30. : 0.2;
+      double vr_every = vr_busy ? 1 / 45. : vr_view.page == ui::kTracking ? 1 / 30. : 0.2;
       bool desk_vis = hwnd && IsWindowVisible(hwnd) && !IsIconic(hwnd);
-      if (desk_vis && (desk_drawn < 0 || m.now - desk_drawn >= (desk_busy ? 1 / 60. : 0.2))) DrawDesktop();
+      if (desk_vis && (desk_drawn < 0 || m.now - desk_drawn >= desk_every)) DrawDesktop();
       bool vr_vis = vr_up && vr::VROverlay()->IsOverlayVisible(page.main);
-      if (vr_vis && (vr_drawn < 0 || m.now - vr_drawn >= (vr_busy ? 1 / 45. : 0.2))) {
+      if (vr_vis && (vr_drawn < 0 || m.now - vr_drawn >= vr_every)) {
         if (vr_img.w != kVrW) vr_img.Resize(kVrW, kVrH);
         Frame(vr_ctx, vr_view, vr_img, kVrScale * m.prefs.ui_scale, vr_applied, vr_drawn, *this);
         page.Show(vr_img);
       }
-      bool remote_busy = m.now - remote_input < 0.6;
-      if (link.shown) link.shown = false, remote_drawn = -1;
-      if (link.CanSend() && (remote_drawn < 0 || m.now - remote_drawn >= (remote_busy ? 1 / 30. : 0.25))) {
-        if (remote_img.w != panel::kW) remote_img.Resize(panel::kW, panel::kH);
-        Frame(remote_ctx, remote_view, remote_img, kVrScale * m.prefs.ui_scale, remote_applied, remote_drawn, remote);
-        link.SendFrame(remote_img);
-      }
-      DWORD wait = desk_busy || vr_busy || remote_busy ? 5 : vr_vis || link.Visible() ? 16 : 50;
+      DWORD wait = (desk_vis && desk_every < 0.1) || (vr_vis && vr_every < 0.1) ? 5 : vr_vis ? 16 : 50;
       HANDLE ev = link.Event();
       MsgWaitForMultipleObjects(ev ? 1 : 0, &ev, FALSE, wait, QS_ALLINPUT);
     }
@@ -1086,7 +1029,6 @@ struct App : Actions {
     if (hwnd) DestroyWindow(hwnd);
     ImGui::DestroyContext(desk_ctx);
     ImGui::DestroyContext(vr_ctx);
-    ImGui::DestroyContext(remote_ctx);
     IM_DELETE(atlas);
     return 0;
   }
@@ -1111,9 +1053,7 @@ int SelfTest(App &app, HINSTANCE inst, const std::string &out) {
   ui::LoadFonts(app.atlas);
   app.vr_ctx = app.MakeContext();
   app.desk_ctx = app.MakeContext();
-  app.remote_ctx = app.MakeContext();
   app.vr_view.vr = true;
-  app.remote_view.vr = app.remote_view.headset = true;
   app.icon = ui::IconImage(app.desk_ctx, app.atlas, 256);
   app.MakeWindow(inst, false);
   line(app.hwnd ? F("window: made, hidden, %dx%d, dpi scale %.2f", app.desk_img.w, app.desk_img.h, app.dpi) : "window: FAILED");
@@ -1141,18 +1081,16 @@ int SelfTest(App &app, HINSTANCE inst, const std::string &out) {
     app.Frame(app.vr_ctx, app.vr_view, app.vr_img, kVrScale * m.prefs.ui_scale, app.vr_applied, app.vr_drawn, app);
   }
   line(F("SteamVR page frame %dx%d: %.1f ms", kVrW, kVrH, (Now() - a) / 10 * 1000));
-  app.remote_img.Resize(panel::kW, panel::kH);
   m.prefs.developer = true;
   for (int p = 0; p < ui::kPageCount; p++) {
-    app.desk_view.page = app.vr_view.page = app.remote_view.page = p;
+    app.desk_view.page = app.vr_view.page = p;
     for (int i = 0; i < 2; i++) {
       m.now = Now();
       app.DrawDesktop();
       app.Frame(app.vr_ctx, app.vr_view, app.vr_img, kVrScale, app.vr_applied, app.vr_drawn, app);
-      app.Frame(app.remote_ctx, app.remote_view, app.remote_img, kVrScale, app.remote_applied, app.remote_drawn, app.remote);
     }
   }
-  line("pages: every page drawn in all three (window, SteamVR, headset panel)");
+  line("pages: every page drawn in both (window, SteamVR)");
 
   upd::Start(DriverRoot(), app.data_dir);
   for (std::string repo : {m.prefs.repo, std::string("CreoleVR/QuestLHSync")}) {

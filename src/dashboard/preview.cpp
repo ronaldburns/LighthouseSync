@@ -237,7 +237,6 @@ int RunPreview(const char *dir, const char *kind, int w, int h, float scale) {
   for (int p = 0; p < ui::kPageCount; p++) {
     ui::View v;
     v.page = p;
-    v.vr = v.headset = !strcmp(kind, "headset");  // the headset panel's pages
     for (int f = 0; f < 3; f++) {
       ui::AtlasNewFrame(atlas);
       ImGui::NewFrame();

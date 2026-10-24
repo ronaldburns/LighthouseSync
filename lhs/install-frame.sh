@@ -11,7 +11,7 @@
 # updates an existing QuestLHSync in place.
 #
 # It also installs LighthouseSync's panel for the headset's SteamVR dashboard (src/panel): it runs with SteamVR, shows
-# the PC's dashboard, and is under the dashboard's "Launch program" to open it.
+# the headset's own status, updates and settings, and is under the dashboard's "Launch program" to open it.
 #
 # Updates after that (unless --no-auto-update): a systemd user timer looks for a new release every 6 hours and
 # downloads it, checked the same way, and a service installs it the next time the headset starts, before its SteamVR

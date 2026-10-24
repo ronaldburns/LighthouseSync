@@ -108,7 +108,7 @@ def main():
         (os.path.join(BIN, "QuestLHSync.exe"), newest("src/dashboard", "src/common", "third_party/imgui"), "build.bat"),
         (module, newest("magisk/src", "magisk/module", "src/headset"), "python magisk\\build_module.py"),
         (frame, newest("frame/src", "frame/driver", "frame/package", "src/headset"), "python frame\\build.py"),
-        (PANEL, newest("src/panel", "src/dashboard", "src/common", "third_party/imgui", "third_party/vulkan", "third_party/qoi"),
+        (PANEL, newest("src/panel", "src/dashboard", "src/common", "third_party/imgui", "third_party/vulkan"),
          "python lhs\\build_panel.py"),
     ]
     for path, src, how in checks:

@@ -427,24 +427,14 @@ void PageOverview(Model &m, View &v, Actions &a) {
 
 // ---------------------------------------------------------------- base stations
 
-// headset: the headset's panel, where it's the PC's Bluetooth all the same
-const char *BleLine(const Model &m, bool headset) {
+const char *BleLine(const Model &m) {
   switch (m.ble) {
     case 1:
-      if (m.power.empty())
-        return headset ? "The PC's Bluetooth is on. Looking for Lighthouse 2.0 base stations."
-                       : "Bluetooth is on. Looking for Lighthouse 2.0 base stations.";
-      return headset ? "The PC's Bluetooth wakes base stations and puts them to sleep." : "Bluetooth is on.";
-    case -1:
-      return headset ? "The PC has no Bluetooth adapter, so base stations can't be woken or put to sleep."
-                     : "This PC has no Bluetooth adapter, so base stations can't be woken or put to sleep from here.";
-    case -2:
-      return headset ? "The PC's Bluetooth is off. Turn it on in Windows settings to control base station power."
-                     : "Bluetooth is off. Turn it on in Windows settings to control base station power.";
-    case -3:
-      return headset ? "The PC's Bluetooth doesn't support Bluetooth Low Energy, which base stations use."
-                     : "This PC's Bluetooth doesn't support Bluetooth Low Energy, which base stations use.";
-    default: return headset ? "Looking for the PC's Bluetooth adapter." : "Looking for this PC's Bluetooth adapter.";
+      return m.power.empty() ? "Bluetooth is on. Looking for Lighthouse 2.0 base stations." : "Bluetooth is on.";
+    case -1: return "This PC has no Bluetooth adapter, so base stations can't be woken or put to sleep from here.";
+    case -2: return "Bluetooth is off. Turn it on in Windows settings to control base station power.";
+    case -3: return "This PC's Bluetooth doesn't support Bluetooth Low Energy, which base stations use.";
+    default: return "Looking for this PC's Bluetooth adapter.";
   }
 }
 
@@ -475,7 +465,7 @@ void PageStations(Model &m, View &v, Actions &a) {
   ImGui::SameLine(0, S(8));
   if (Button("Sleep all", kNormal, ble && !m.power.empty())) a.Power("", kCmdSleep);
   TitleEnd(r);
-  Wrapped(BleLine(m, v.headset), col::dim, kBody);
+  Wrapped(BleLine(m), col::dim, kBody);
   Gap(10);
 
   struct Line {
@@ -846,13 +836,11 @@ void PageSettings(Model &m, View &v, Actions &a) {
   SettingBegin("Developer pages", "Shows the Cameras, Diagnostics and Log pages.", S(40));
   if (Toggle("developer", &m.prefs.developer)) a.PrefsChanged();
   SettingEnd();
-  if (!v.headset) {
-    Divider();
-    SettingBegin("Data folder", "Logs, recordings and what LighthouseSync has learned about your headsets and base stations.",
-                 ButtonWidth("Open"));
-    if (Button("Open##data")) a.OpenDataFolder();
-    SettingEnd();
-  }
+  Divider();
+  SettingBegin("Data folder", "Logs, recordings and what LighthouseSync has learned about your headsets and base stations.",
+               ButtonWidth("Open"));
+  if (Button("Open##data")) a.OpenDataFolder();
+  SettingEnd();
   CardEnd();
 
   CardBegin(W);
@@ -871,14 +859,12 @@ void PageSettings(Model &m, View &v, Actions &a) {
     a.PrefsChanged();
   }
   SettingEnd();
-  if (!v.headset) {
-    Divider();
-    SettingBegin("Open this window with SteamVR",
-                 "Shows this window on the desktop each time SteamVR starts. The page in SteamVR's dashboard is always there.",
-                 S(40));
-    if (Toggle("open_window", &m.prefs.open_window)) a.PrefsChanged();
-    SettingEnd();
-  }
+  Divider();
+  SettingBegin("Open this window with SteamVR",
+               "Shows this window on the desktop each time SteamVR starts. The page in SteamVR's dashboard is always there.",
+               S(40));
+  if (Toggle("open_window", &m.prefs.open_window)) a.PrefsChanged();
+  SettingEnd();
   CardEnd();
 }
 
@@ -925,13 +911,9 @@ void HeadsetUpdates(const Model &m, View &v, Actions &a) {
   } else if (p.auto_update) {
     if (Button("Check now##headset", kNormal, !p.checking)) a.HeadsetCheck();
   } else {
-    Wrapped(v.headset ? "Run the installer on the headset again to update it, or to turn automatic updates back on."
-                      : "Run the installer on the headset again to update it, or to turn automatic updates back on:",
-            col::dim, kBody);
-    if (!v.headset) {
-      Gap(2);
-      CodeLine(F("curl -fsSL https://github.com/%s/releases/latest/download/install-frame.sh | bash", m.prefs.repo.c_str()), a);
-    }
+    Wrapped("Run the installer on the headset again to update it, or to turn automatic updates back on:", col::dim, kBody);
+    Gap(2);
+    CodeLine(F("curl -fsSL https://github.com/%s/releases/latest/download/install-frame.sh | bash", m.prefs.repo.c_str()), a);
   }
 }
 
@@ -944,7 +926,7 @@ void PageUpdates(Model &m, View &v, Actions &a) {
   float W = ImGui::GetContentRegionAvail().x;
 
   CardBegin(W);
-  CardTitle(v.headset ? "The PC" : "This PC");
+  CardTitle("This PC");
   Gap(2);
   KeyValue("Installed", LHS_VERSION);
   if (m.have_extra && m.ex.driver_version[0] && strcmp(m.ex.driver_version, LHS_VERSION) != 0)
@@ -963,7 +945,6 @@ void PageUpdates(Model &m, View &v, Actions &a) {
         Text(F("Version %s is available.", u.latest.c_str()).c_str(), col::text, g_fonts.medium, kBody);
         Gap(2);
         if (Button("Download and install", kPrimary)) a.InstallUpdate();
-        if (v.headset) Text("It installs on the PC.", col::dim, g_fonts.body, kSmall);
         break;
       case kUpdDownloading:
         Text(F("Downloading %s", u.latest.c_str()).c_str(), col::dim);
@@ -1199,10 +1180,8 @@ void PageDiagnostics(Model &m, View &v, Actions &a) {
   bool live = m.have_status && !m.stale;
   if (Button(s.recording ? "Stop recording" : "Record session", s.recording ? kDanger : kNormal, live))
     a.Command(s.recording ? QLHS_CMD_RECORD_OFF : QLHS_CMD_RECORD_ON);
-  if (!v.headset) {
-    ImGui::SameLine(0, S(8));
-    if (Button("Open data folder")) a.OpenDataFolder();
-  }
+  ImGui::SameLine(0, S(8));
+  if (Button("Open data folder")) a.OpenDataFolder();
   Gap(2);
   Wrapped(s.recording ? "Recording what the driver receives, for a bug report."
                       : "A recording saves what the driver receives to the data folder, for bug reports.",
@@ -1212,16 +1191,14 @@ void PageDiagnostics(Model &m, View &v, Actions &a) {
 }
 
 void PageLog(Model &m, View &v, Actions &a) {
-  Row r = TitleBegin("Log", v.headset ? 0 : Widths({"Copy all", "Open data folder"}));
-  if (!v.headset) {  // the clipboard and folders are the PC's
-    if (Button("Copy all")) {
-      std::string all;
-      for (const auto &l : m.log) all += l + "\n";
-      a.Copy(all);
-    }
-    ImGui::SameLine(0, S(8));
-    if (Button("Open data folder")) a.OpenDataFolder();
+  Row r = TitleBegin("Log", Widths({"Copy all", "Open data folder"}));
+  if (Button("Copy all")) {
+    std::string all;
+    for (const auto &l : m.log) all += l + "\n";
+    a.Copy(all);
   }
+  ImGui::SameLine(0, S(8));
+  if (Button("Open data folder")) a.OpenDataFolder();
   TitleEnd(r);
   float W = ImGui::GetContentRegionAvail().x, H = std::max(S(240), ImGui::GetContentRegionAvail().y - S(4));
   ImVec2 o = ImGui::GetCursorScreenPos();

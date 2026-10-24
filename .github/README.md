@@ -76,20 +76,22 @@ dashboard, with its icon next to SteamVR's own pages. It starts with SteamVR on
 the headset, and picking **LighthouseSync** under **Launch program** (+) in the
 dashboard opens it.
 
-While the PC's dashboard is connected, the page is the PC's dashboard: the same
-pages as on the desktop, drawn on the PC at the page's size and sent over the
-network. Pointing and clicking with a controller works as on the PC's SteamVR
-page. Settings change on the PC, as they always do.
+The page runs entirely on the headset and shows what the headset knows:
 
-Without the PC, the page shows the headset's own status: whether lhsyncd (the
-part that sends the headset's cameras to the PC) is answering, which PC it's
-synced with, and the headset's updates, with **Check now** and **Install it
-now**. If the PC is synced but its dashboard doesn't connect, the PC has an
-older LighthouseSync or QuestLHSync, which don't have the page; updating the PC
-fixes it.
+- whether it's synced with a PC, and which one
+- whether lhsyncd (the part that sends what the headset's cameras see of the
+  base stations to the PC) is running, with a **Restart** button, and its
+  recent log
+- the headset's updates, with **Check now** and **Install it now**
+- **Automatic updates**, on or off
 
-The PC's dashboard connects to the page on TCP port 47282 of the headset it's
-synced with. The page only accepts a PC that has a connection to the headset's
+The PC's tracking, base stations and settings stay on the PC. To see the PC's
+LighthouseSync from the headset, open its window with SteamVR's own desktop
+view.
+
+The PC's dashboard also connects to the page, on TCP port 47282 of the headset
+it's synced with, so its Updates page can show and update the headset's
+release. The page only accepts a PC that has a connection to the headset's
 lhsyncd.
 
 ## Updates
@@ -104,8 +106,9 @@ lhsyncd.
   headset starts, before its SteamVR does. The headset's
   [LighthouseSync page](#the-steam-frames-page) shows it and can install it
   right away, which restarts SteamVR on the headset, and so does running the
-  install command again. `systemctl --user list-timers lighthousesync-update.timer`
-  shows the next check.
+  install command again. Its **Automatic updates** setting turns the timer off
+  and on. `systemctl --user list-timers lighthousesync-update.timer` shows the
+  next check.
 - **Quest:** open Magisk, go to **Modules** and tap **Update** on LighthouseSync.
 
 ## Uninstall
@@ -177,6 +180,7 @@ QuestLHSync.exe --preview <dir> [locked|acquiring|searching|stale|headset]   PNG
 QuestLHSync.exe --selftest <file>           checks the dashboard without showing a window or changing SteamVR
 python lhs\build_panel.py                   the Steam Frame's page, into build\panel\ (Zig, as frame\build.py)
 lighthousesync-panel --probe                on the headset: whether its SteamVR has the page, changing nothing
+lighthousesync-panel --page <file>          on the headset: the page as RGBA pixels, and how long it takes to draw
 python lhs\package.py v1.26.3 owner/name    the release files, into out\lhs-release\
 python lhs\make_icon.py                     lhs\icon.ico from the dashboard's own drawing
 ```
@@ -186,9 +190,8 @@ repository, from the `LHS_VERSION` and `LHS_REPO` environment variables, as the
 Build workflow does. A build that isn't stamped calls itself a development
 build and doesn't update itself.
 
-The dashboard and the headset's page use [Dear ImGui](https://github.com/ocornut/imgui),
-the [IBM Plex](https://github.com/IBM/plex) fonts and [QOI](https://github.com/phoboslab/qoi),
-and the page is built against the
+The dashboard and the headset's page use [Dear ImGui](https://github.com/ocornut/imgui)
+and the [IBM Plex](https://github.com/IBM/plex) fonts, and the page is built against the
 [Vulkan headers](https://github.com/KhronosGroup/Vulkan-Headers), all in
 `third_party/`. Their notices are in
 [lhs/THIRD_PARTY_NOTICES.md](../lhs/THIRD_PARTY_NOTICES.md).

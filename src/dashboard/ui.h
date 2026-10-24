@@ -11,7 +11,6 @@ enum Page { kOverview, kStations, kTracking, kSettings, kUpdates, kCameras, kDia
 struct View {
   int page = kOverview;
   bool vr = false;            // text settings go through the SteamVR keyboard
-  bool headset = false;       // the headset's own panel: no Bluetooth or PC folders here
   Field host, headset_pref, repo;
   std::string repo_error;
   double confirm_until = -1;  // Recalibrate waits for a second press until then (Model::now)

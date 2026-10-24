@@ -22,16 +22,6 @@ the complete text is in `third_party/fonts/OFL.txt`.
 
 Source: https://github.com/IBM/plex
 
-## QOI
-
-The dashboard and the headset panel send the dashboard's pages to the headset as QOI images, with `qoi.h` from
-phoboslab/qoi commit `ffb2d2cb`, unmodified, in `third_party/qoi`.
-
-Copyright (c) 2021 Dominic Szablewski. Licensed under the MIT License; the complete text is in
-`third_party/qoi/LICENSE`.
-
-Source: https://github.com/phoboslab/qoi
-
 ## Vulkan-Headers 1.4.309
 
 The headset panel is built against the Vulkan headers from KhronosGroup/Vulkan-Headers tag `v1.4.309`, unmodified, in

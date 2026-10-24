@@ -8,15 +8,10 @@
 
 #include <algorithm>
 
-#define QOI_IMPLEMENTATION
-#define QOI_NO_STDIO
-#include "../../third_party/qoi/qoi.h"
-
 namespace lhs {
 
 namespace {
 const SOCKET kNone = INVALID_SOCKET;
-const int kBand = 40;  // rows per changed rectangle
 }  // namespace
 
 void PanelLink::Start() {
@@ -34,14 +29,11 @@ void PanelLink::Stop() {
 void PanelLink::Close(double now, double retry) {
   if ((SOCKET)s_ != kNone) closesocket((SOCKET)s_);
   s_ = (uintptr_t)kNone;
-  connecting_ = hello_ = visible_ = broken_ = false;
+  connecting_ = hello_ = broken_ = false;
   in_.clear();
   out_.clear();
   out_off_ = 0;
-  full_ = true;
-  bool had = info.connected;
   info = PanelInfo();
-  if (had) mouse.push_back({panel::kLeave, 0, 0, 0, 0});
   retry_at_ = now + retry;
 }
 
@@ -152,22 +144,6 @@ void PanelLink::Handle(uint8_t type, const char *p, uint32_t n, double now) {
       info.version = version;
       break;
     }
-    case panel::kVisible: {
-      bool v = n && p[0];
-      if (v == visible_) break;
-      visible_ = v;
-      if (v) full_ = shown = true;
-      else mouse.push_back({panel::kLeave, 0, 0, 0, 0});
-      break;
-    }
-    case panel::kMouse:
-      if (n >= sizeof(panel::Mouse)) {
-        panel::Mouse m;
-        memcpy(&m, p, sizeof m);
-        mouse.push_back(m);
-      }
-      break;
-    case panel::kText: texts.push_back(text); break;
     case panel::kStatus: {
       size_t at = 0;
       while (at < text.size()) {
@@ -185,16 +161,15 @@ void PanelLink::Handle(uint8_t type, const char *p, uint32_t n, double now) {
       }
       break;
     }
-    default: break;  // kPing, and what a newer panel adds
+    default: break;  // kPing, v1.26.3's pointer and page messages, and what a newer panel adds
   }
 }
 
-void PanelLink::Put(uint8_t type, const void *p, uint32_t n, const void *p2, uint32_t n2) {
+void PanelLink::Put(uint8_t type, const void *p, uint32_t n) {
   if ((SOCKET)s_ == kNone || connecting_) return;
-  panel::Header h{type, 0, 0, n + n2};
+  panel::Header h{type, 0, 0, n};
   out_.append((const char *)&h, sizeof h);
   if (n) out_.append((const char *)p, n);
-  if (n2) out_.append((const char *)p2, n2);
 }
 
 void PanelLink::Flush() {
@@ -215,58 +190,6 @@ void PanelLink::Flush() {
     out_.erase(0, out_off_);
     out_off_ = 0;
   }
-}
-
-void PanelLink::Keyboard(const std::string &title, const std::string &value) {
-  std::string p = title;
-  p += '\0';
-  p += value;
-  Put(panel::kKeyboard, p.data(), (uint32_t)p.size());
-}
-
-void PanelLink::SendFrame(const swr::Image &img) {
-  if (!Visible()) return;
-  int w = img.w, h = img.h;
-  if (prev_.w != w || prev_.h != h) {
-    prev_.Resize(w, h);
-    full_ = true;
-  }
-  bool any = false;
-  for (int y0 = 0; y0 < h; y0 += kBand) {
-    int y1 = std::min(h, y0 + kBand), x0 = w, x1 = -1;
-    for (int y = y0; y < y1 && !(x0 == 0 && x1 == w - 1); y++) {
-      const uint32_t *a = &img.px[(size_t)y * w], *b = &prev_.px[(size_t)y * w];
-      if (full_) {
-        x0 = 0, x1 = w - 1;
-        break;
-      }
-      if (!memcmp(a, b, (size_t)w * 4)) continue;
-      int l = 0, r = w - 1;
-      while (a[l] == b[l]) l++;
-      while (a[r] == b[r]) r--;
-      x0 = std::min(x0, l);
-      x1 = std::max(x1, r);
-    }
-    if (x1 < 0) continue;
-    int rw = x1 - x0 + 1, rh = y1 - y0;
-    tile_.resize((size_t)rw * rh);
-    for (int y = y0; y < y1; y++) {
-      const uint32_t *src = &img.px[(size_t)y * w + x0];
-      memcpy(&tile_[(size_t)(y - y0) * rw], src, (size_t)rw * 4);
-      memcpy(&prev_.px[(size_t)y * w + x0], src, (size_t)rw * 4);
-    }
-    qoi_desc d{(unsigned)rw, (unsigned)rh, 4, QOI_SRGB};
-    int qn = 0;
-    void *q = qoi_encode(tile_.data(), &d, &qn);
-    if (!q) continue;
-    panel::Rect r{(uint16_t)x0, (uint16_t)y0, (uint16_t)rw, (uint16_t)rh};
-    Put(panel::kRect, &r, sizeof r, q, (uint32_t)qn);
-    free(q);
-    any = true;
-  }
-  full_ = false;
-  if (any) Put(panel::kPresent, nullptr, 0);
-  Flush();
 }
 
 }  // namespace lhs
