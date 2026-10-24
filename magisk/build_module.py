@@ -23,6 +23,11 @@ HEADSET = os.path.join(os.path.dirname(HERE), "src", "headset")
 with open(os.path.join(os.path.dirname(HERE), "src", "common", "qlhs_status.h"), encoding="utf-8") as _h:
     VERSION = "v" + re.search(r'#define QLHS_RELEASE "([^"]+)"', _h.read()).group(1)  # the driver's
 CODE = 8
+# LighthouseSync releases (lhs/stamp.py's version in LHS_VERSION): that version, and a versionCode that grows with it
+if os.environ.get("LHS_VERSION"):
+    VERSION = "v" + os.environ["LHS_VERSION"].lstrip("v")
+    _n = [int(x) for x in re.findall(r"\d+", VERSION)][:3] + [0, 0]
+    CODE = _n[0] * 1000000 + _n[1] * 1000 + _n[2]
 # 17.10.0 android-arm64, the build lhsight was developed on. 17.19.0 crashed the sensors HAL on injection (SIGSEGV in
 # its bootstrap thread), so test any upgrade before shipping it.
 FRIDA_VERSION = "17.10.0"
@@ -73,6 +78,9 @@ def main():
     js = js.replace("@CSRC@", c).replace("@DUR@", "0")
     prop = open(os.path.join(HERE, "module", "module.prop.in"), encoding="utf-8").read()
     prop = prop.replace("@VERSION@", VERSION).replace("@CODE@", str(CODE))
+    if os.environ.get("LHS_REPO"):  # LighthouseSync releases: Magisk offers updates from the repository's releases
+        prop = prop.replace("name=QuestLHSync", "name=LighthouseSync").rstrip("\r\n") + (
+            f"\nupdateJson=https://github.com/{os.environ['LHS_REPO']}/releases/latest/download/quest-update.json\n")
     zpath = os.path.join(OUT, f"QuestLHSync-quest-module-{VERSION.lstrip('v')}.zip")
     with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as z:
         def add(name, data, mode=0o644):
