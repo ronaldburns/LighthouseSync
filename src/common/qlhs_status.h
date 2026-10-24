@@ -30,7 +30,8 @@ enum QlhsCmd : int32_t {
   QLHS_CMD_RESUME = 3,
   QLHS_CMD_RECORD_ON = 4,
   QLHS_CMD_RECORD_OFF = 5,
-  QLHS_CMD_RECALIBRATE = 6,  // drop every learned and saved alignment of this headset and start over
+  QLHS_CMD_RECALIBRATE = 6,  // drop every learned and saved alignment of this headset, and the base stations' saved
+                             // measurements (relations.json), and start over
 };
 
 #pragma pack(push, 8)

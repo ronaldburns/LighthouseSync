@@ -606,7 +606,10 @@ class Provider : public vr::IServerTrackedDeviceProvider {
       case QLHS_CMD_RESUME: g_sync->SetPaused(false); Log("corrections resumed"); break;
       case QLHS_CMD_RECORD_ON: SetRecording(true); break;
       case QLHS_CMD_RECORD_OFF: SetRecording(false); break;
-      case QLHS_CMD_RECALIBRATE: g_sync->ForceRecalibrate(); break;
+      case QLHS_CMD_RECALIBRATE:  // the base stations' saved measurements too: a stale one puts a station off
+        g_sync->ForceRecalibrate();
+        g_rel->Clear();
+        break;
     }
   }
 

@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -30,6 +31,8 @@ class Relations {
   // logs what Average changed since the last call and writes relations.json, at most every 10 s unless now (the
   // driver's worker thread)
   void Flush(bool now = false);
+  // every pair's measurements dropped, as if relations.json had been deleted (Recalibrate)
+  void Clear();
 
   struct Pose { Quat q; V3 t; };
   static Pose Inv(const Pose &p);
@@ -43,7 +46,8 @@ class Relations {
   std::atomic<bool> enabled_{true};
   std::mutex m_;
   std::map<std::pair<uint32_t, uint32_t>, std::vector<Pose>> pairs_;  // lower serial first: a = rel * b
-  std::map<std::pair<uint32_t, uint32_t>, Pose> pending_;              // one far from the average, waiting for another
+  std::map<std::pair<uint32_t, uint32_t>, std::vector<Pose>> pending_;  // far from the average, waiting for another
+  std::map<std::pair<uint32_t, uint32_t>, uint64_t> fresh_;             // GetTickCount64 of its newest averaged one
   bool dirty_ = false;                                                 // pairs_ changed since relations.json
   std::vector<std::string> said_;                                      // log lines for Flush
   uint64_t saved_t_ = 0, say_t0_ = 0;                                  // GetTickCount64 ms
@@ -52,6 +56,12 @@ class Relations {
   void *target_ = nullptr;
 
   void Load();
+  // SteamVR's measurement of a and b (a = out * b) from their pair's average, if it was measured in the last kFreshMs
+  // without a far one since (m_ held)
+  bool Leg(uint32_t a, uint32_t b, uint64_t now, Pose &out) const;
+  // a third station through which SteamVR's fresh measurements agree with p and not with the pair's average m, or ""
+  // (m_ held)
+  std::string Route(std::pair<uint32_t, uint32_t> key, const Pose &p, const Pose &m, uint64_t now) const;
   void Say(const std::string &s);  // a log line for Flush, at most 10 a minute (m_ held)
   void Roll(uint64_t now);         // Say's next minute, once it's due: how many it dropped (m_ held)
   std::string Json() const;  // relations.json's contents, m_ held

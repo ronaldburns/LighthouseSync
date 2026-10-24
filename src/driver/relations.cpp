@@ -17,7 +17,16 @@ namespace {
 // a relationship this far from the pair's average isn't averaged in, and a second one like it means the station moved
 // (one device's view is off by up to ~3 cm and 1.5 deg, rarely more)
 constexpr double kFarM = 0.15, kFarDeg = 2.5;
-constexpr double kAgreeM = 0.06, kAgreeDeg = 1.0;  // two far ones this close: the station's new place
+// LighthouseSync: two far ones this close: the station's new place. Was 6 cm and 1 deg, closer than two readings of
+// one place often are (a pair's kept ones spread up to ~3 cm and ~1.7 deg each side of their average), so a station
+// that moved could go on being put back where it was
+constexpr double kAgreeM = 0.08, kAgreeDeg = 3.0;
+constexpr size_t kFarKeep = 4;                      // the newest far ones a pair keeps while it waits
+// LighthouseSync: a far one that SteamVR's measurements through a third station agree with this closely, while the
+// average is far from them too: the station moved, and this one is its new place. The third station's pairs with
+// each of them have to have been measured in the last kFreshMs without a far one since
+constexpr double kRouteM = 0.10, kRouteDeg = 3.0;
+constexpr uint64_t kFreshMs = 600000;
 constexpr size_t kKeepRel = 30;                     // the newest relationships a pair keeps
 // LighthouseSync: fewer than this and the average doesn't stand. SteamVR keeps its own, and a far one starts the pair
 // over: one taken in SteamVR's first minutes, while it still places its stations, otherwise stays for good, the later
@@ -70,6 +79,9 @@ void ToF(const Relations::Pose &p, float f[7]) {
 bool Far(const Relations::Pose &a, const Relations::Pose &b, double m, double deg) {
   return norm(a.t - b.t) > m || QuatDeg(a.q, b.q) > deg;
 }
+
+// a = x * c and c = y * b: a = (x * y) * b
+Relations::Pose Then(const Relations::Pose &x, const Relations::Pose &y) { return {x.q * y.q, x.t + Rot(x.q, y.t)}; }
 
 std::string Name(uint32_t s) { return Fmt("LHB-%08X", s); }
 
@@ -195,19 +207,26 @@ bool Relations::Average(uint32_t a, uint32_t b, const float rel[7], float out[7]
   if (flip) p = Inv(p);
   std::string pair = Name(key.first) + " and " + Name(key.second);
   std::lock_guard<std::mutex> g(m_);
+  uint64_t now = GetTickCount64();
   std::vector<Pose> &v = pairs_[key];
-  std::string said;
+  std::string said, via;
+  const Pose *agree = nullptr;
   if (v.empty()) {
     v.push_back(p);
+    fresh_[key] = now;
     said = Fmt("base stations %s: SteamVR's first measurement of them, kept for averaging", pair.c_str());
   } else {
     Pose m = Mean(v);
     double cm = norm(p.t - m.t) * 100, deg = QuatDeg(p.q, m.q);
     auto pend = pending_.find(key);
+    if (pend != pending_.end())
+      for (auto &f : pend->second)
+        if (!Far(p, f, kAgreeM, kAgreeDeg)) agree = &f;
     if (!Far(p, m, kFarM, kFarDeg)) {
       v.push_back(p);
       if (v.size() > kKeepRel) v.erase(v.begin());
       if (pend != pending_.end()) pending_.erase(pend);
+      fresh_[key] = now;
       said = v.size() < kTrusted
                  ? Fmt("base stations %s: SteamVR measured them %.1f cm and %.2f deg from the average of %zu, kept "
                        "for averaging",
@@ -221,14 +240,25 @@ bool Relations::Average(uint32_t a, uint32_t b, const float rel[7], float out[7]
                  pair.c_str(), cm, deg, v.size());
       v = {p};
       if (pend != pending_.end()) pending_.erase(pend);
-    } else if (pend != pending_.end() && !Far(p, pend->second, kAgreeM, kAgreeDeg)) {
-      v = {pend->second, p};
+      fresh_[key] = now;
+    } else if (!(via = Route(key, p, m, now)).empty()) {
+      said = Fmt("base stations %s: SteamVR measured them %.1f cm and %.2f deg from the average of %zu, where its "
+                 "measurements through %s put them too: moved, averaging from the new place",
+                 pair.c_str(), cm, deg, v.size(), via.c_str());
+      v = {p};
+      if (pend != pending_.end()) pending_.erase(pend);
+      fresh_[key] = now;
+    } else if (agree) {
+      v = {*agree, p};
       pending_.erase(pend);
+      fresh_[key] = now;
       said = Fmt("base stations %s: SteamVR measured them %.1f cm and %.2f deg from the average twice: moved, "
                  "averaging from the new place",
                  pair.c_str(), cm, deg);
     } else {
-      pending_[key] = p;
+      std::vector<Pose> &waiting = pending_[key];
+      waiting.push_back(p);
+      if (waiting.size() > kFarKeep) waiting.erase(waiting.begin());
       said = Fmt("base stations %s: SteamVR measured them %.1f cm and %.2f deg from the average of %zu: kept the "
                  "average (another like it means a station moved)",
                  pair.c_str(), cm, deg, v.size());
@@ -241,6 +271,43 @@ bool Relations::Average(uint32_t a, uint32_t b, const float rel[7], float out[7]
   if (flip) m = Inv(m);
   ToF(m, out);
   return true;
+}
+
+bool Relations::Leg(uint32_t a, uint32_t b, uint64_t now, Pose &out) const {
+  auto key = a < b ? std::make_pair(a, b) : std::make_pair(b, a);
+  auto it = pairs_.find(key);
+  auto f = fresh_.find(key);
+  if (it == pairs_.end() || it->second.empty() || f == fresh_.end() || now - f->second > kFreshMs ||
+      pending_.count(key))
+    return false;
+  out = Mean(it->second);
+  if (a > b) out = Inv(out);
+  return true;
+}
+
+std::string Relations::Route(std::pair<uint32_t, uint32_t> key, const Pose &p, const Pose &m, uint64_t now) const {
+  std::set<uint32_t> others;
+  for (auto &kv : pairs_)
+    for (uint32_t s : {kv.first.first, kv.first.second})
+      if (s != key.first && s != key.second) others.insert(s);
+  for (uint32_t c : others) {
+    Pose ac, cb;
+    if (!Leg(key.first, c, now, ac) || !Leg(c, key.second, now, cb)) continue;
+    Pose r = Then(ac, cb);
+    if (!Far(p, r, kRouteM, kRouteDeg) && Far(m, r, kFarM, kFarDeg)) return Name(c);
+  }
+  return "";
+}
+
+void Relations::Clear() {
+  std::lock_guard<std::mutex> g(m_);
+  if (pairs_.empty()) return;
+  pairs_.clear();
+  pending_.clear();
+  fresh_.clear();
+  dirty_ = true;
+  Say("base stations: their saved measurements are dropped too, SteamVR places them by its own until it has measured "
+      "each pair 3 times again");
 }
 
 void Relations::Roll(uint64_t now) {
