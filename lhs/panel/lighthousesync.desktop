@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=LighthouseSync
+Comment=LighthouseSync's page in the SteamVR dashboard. Opens it when it's already running.
+# install-frame.sh writes the panel's full path here: Steam may start it without ~/.local/share/questlhsync in PATH
+Exec=@BINARY@
+Icon=lighthousesync
+Terminal=false
+Categories=Utility;

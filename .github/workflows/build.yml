@@ -68,7 +68,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force build\preview | Out-Null
-          foreach ($kind in 'locked', 'searching') {
+          foreach ($kind in 'locked', 'searching', 'headset') {
             $p = Start-Process driver\questlhsync\bin\win64\QuestLHSync.exe -ArgumentList '--preview', 'build\preview', $kind -Wait -PassThru
             if ($p.ExitCode -ne 0) { throw "--preview $kind exited with $($p.ExitCode)" }
           }
@@ -101,6 +101,10 @@ jobs:
       - name: Build the Steam Frame package
         run: python frame/build.py
 
+      # The headset's SteamVR dashboard page (src/panel), cross-compiled with the same Zig
+      - name: Build the Steam Frame panel
+        run: python lhs/build_panel.py
+
       - name: Package the release
         if: inputs.version != ''
         run: python lhs/package.py "v$LHS_VERSION" "$GITHUB_REPOSITORY"
@@ -122,4 +126,5 @@ jobs:
             driver/questlhsync/
             out/QuestLHSync-quest-module-*.zip
             out/QuestLHSync-frame-*.tar.gz
+            build/panel/lighthousesync-panel
           if-no-files-found: error

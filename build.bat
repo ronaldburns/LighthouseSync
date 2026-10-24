@@ -37,9 +37,10 @@ rem C++20 for C++/WinRT (ble_win.cpp): under C++17 it uses the experimental coro
 cl /nologo /utf-8 /O2 /EHsc /std:c++20 /permissive- /MT /W3 /DNDEBUG /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DUNICODE /D_UNICODE /D_CRT_SECURE_NO_WARNINGS %IMGUI_DEFS% ^
   /I%OVR%\headers /Ithird_party\imgui /Isrc\common /Fobuild\overlay\ ^
   src\dashboard\dashboard_main.cpp src\dashboard\ui.cpp src\dashboard\theme.cpp src\dashboard\swr.cpp src\dashboard\preview.cpp ^
-  src\dashboard\ble_win.cpp src\dashboard\updater_win.cpp build\imgui\*.obj build\overlay\dashboard.res ^
+  src\dashboard\ble_win.cpp src\dashboard\updater_win.cpp src\dashboard\icon.cpp src\dashboard\panel_link_win.cpp ^
+  build\imgui\*.obj build\overlay\dashboard.res ^
   /Fe:%OUT%\QuestLHSync.exe /link /NOLOGO /SUBSYSTEM:WINDOWS %OVR%\lib\win64\openvr_api.lib gdi32.lib user32.lib shell32.lib ^
-  d3d11.lib dxgi.lib dwmapi.lib winhttp.lib bcrypt.lib windowsapp.lib || exit /b 1
+  d3d11.lib dxgi.lib dwmapi.lib winhttp.lib bcrypt.lib windowsapp.lib ws2_32.lib || exit /b 1
 copy /y %OVR%\bin\win64\openvr_api.dll %OUT%\ >nul
 echo built %OUT%\QuestLHSync.exe
 if /i "%1"=="overlay" exit /b 0

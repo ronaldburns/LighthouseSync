@@ -1,9 +1,10 @@
-"""Packs a LighthouseSync release into out/lhs-release/ from what build.bat, magisk/build_module.py and frame/build.py
-built (LHS_VERSION and LHS_REPO set for all three, as the release workflow does):
+"""Packs a LighthouseSync release into out/lhs-release/ from what build.bat, magisk/build_module.py, frame/build.py and
+lhs/build_panel.py built (LHS_VERSION and LHS_REPO set for all of them, as the release workflow does):
 
   LighthouseSync-steamvr-<version>.zip         the SteamVR driver folder questlhsync/ (driver, dashboard, openvr_api.dll)
   LighthouseSync-quest-module-<version>.zip    the Quest's Magisk module
-  LighthouseSync-frame-<version>.tar.gz        the Steam Frame's package (QuestLHSync-frame/ with its install.sh)
+  LighthouseSync-frame-<version>.tar.gz        the Steam Frame's package (QuestLHSync-frame/ with its install.sh),
+                                               and the headset panel in QuestLHSync-frame/lhs/
   install.ps1, install-frame.sh                the one-line installers, pointed at the repository
   quest-update.json                            Magisk's update feed for the module
   SHA256SUMS                                   all of the above
@@ -28,6 +29,7 @@ DRIVER = os.path.join(ROOT, "driver", "questlhsync")
 BIN = os.path.join(DRIVER, "bin", "win64")
 OUT = os.path.join(ROOT, "out")
 DEST = os.path.join(OUT, "lhs-release")
+PANEL = os.path.join(ROOT, "build", "panel", "lighthousesync-panel")
 NOTICES = (("LICENSE", "LICENSE"), ("THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.md"),
            (os.path.join("lhs", "THIRD_PARTY_NOTICES.md"), "THIRD_PARTY_NOTICES-LighthouseSync.md"))
 
@@ -64,13 +66,25 @@ def module_zip(src_path, out):
 
 
 def frame_tar(src_path, out):
+    panel = [("lhs/lighthousesync-panel", PANEL, 0o755)]
+    for name in ("lighthousesync-panel.service", "lighthousesync.desktop"):
+        panel.append((f"lhs/{name}", os.path.join(ROOT, "lhs", "panel", name), 0o644))
+    for n in (48, 128, 256):
+        panel.append((f"lhs/icons/lighthousesync-{n}.png", os.path.join(ROOT, "lhs", "panel", "icons", f"lighthousesync-{n}.png"), 0o644))
     with tarfile.open(src_path, "r:gz") as src, tarfile.open(out, "w:gz") as t:
         for m in src.getmembers():
             t.addfile(m, src.extractfile(m) if m.isfile() else None)
-        for name, data in notices():
+
+        def add(name, data, mode):
             info = tarfile.TarInfo(f"QuestLHSync-frame/{name}")
-            info.size, info.mode, info.mtime = len(data), 0o644, int(time.time())
+            info.size, info.mode, info.mtime = len(data), mode, int(time.time())
             t.addfile(info, io.BytesIO(data))
+        for name, path, mode in panel:  # install-frame.sh installs these (upstream's install.sh doesn't know them)
+            with open(path, "rb") as f:
+                data = f.read()
+            add(name, data if name.endswith((".png", "-panel")) else data.replace(b"\r\n", b"\n"), mode)
+        for name, data in notices():
+            add(name, data, 0o644)
 
 
 def script(name, repo, out):
@@ -94,6 +108,8 @@ def main():
         (os.path.join(BIN, "QuestLHSync.exe"), newest("src/dashboard", "src/common", "third_party/imgui"), "build.bat"),
         (module, newest("magisk/src", "magisk/module", "src/headset"), "python magisk\\build_module.py"),
         (frame, newest("frame/src", "frame/driver", "frame/package", "src/headset"), "python frame\\build.py"),
+        (PANEL, newest("src/panel", "src/dashboard", "src/common", "third_party/imgui", "third_party/vulkan", "third_party/qoi"),
+         "python lhs\\build_panel.py"),
     ]
     for path, src, how in checks:
         if not os.path.exists(path) or os.path.getmtime(path) < src:

@@ -1,0 +1,18 @@
+[Unit]
+Description=LighthouseSync: its page in the headset's SteamVR dashboard
+# an overlay, so it runs only while SteamVR does
+After=steamvr.service
+PartOf=steamvr.service
+ConditionPathExists=%h/.local/share/questlhsync/lighthousesync-panel
+
+[Service]
+ExecStart=%h/.local/share/questlhsync/lighthousesync-panel
+# back after SteamVR restarts on its own; stopping steamvr.service stops this too (PartOf), with no restart
+Restart=always
+RestartSec=5
+# 3: another panel was already running
+RestartPreventExitStatus=3
+SuccessExitStatus=3
+
+[Install]
+WantedBy=steamvr.service

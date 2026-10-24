@@ -3,6 +3,7 @@
 #include <ctype.h>
 #include <math.h>
 #include <string.h>
+#include <time.h>
 
 #include <algorithm>
 
@@ -230,7 +231,7 @@ void Sidebar(Model &m, View &v) {
                               {kSettings, "Settings"}, {kUpdates, "Updates"}};
   static const Item dev[] = {{kCameras, "Cameras"}, {kDiagnostics, "Diagnostics"}, {kLog, "Log"}};
   for (const Item &it : main) {
-    const char *note = it.page == kUpdates && m.upd.state == kUpdAvailable ? "New" : nullptr;
+    const char *note = it.page == kUpdates && (m.upd.state == kUpdAvailable || !m.panel.staged.empty()) ? "New" : nullptr;
     if (NavItem(it.label, v.page == it.page, note)) v.page = it.page;
   }
   if (m.prefs.developer) {
@@ -386,6 +387,12 @@ void PageOverview(Model &m, View &v, Actions &a) {
     Notice("The update is installed. Restart SteamVR to finish it.", col::good);
     Gap(4);
   }
+  if (!m.panel.staged.empty()) {
+    if (Notice(F("The headset downloaded %s. It installs the next time the headset starts.", m.panel.staged.c_str()).c_str(),
+               col::accent, "Details"))
+      v.page = kUpdates;
+    Gap(4);
+  }
   if (!m.restart_keys.empty()) {
     Notice("Some settings you changed take effect after SteamVR restarts.", col::warn);
     Gap(4);
@@ -420,14 +427,24 @@ void PageOverview(Model &m, View &v, Actions &a) {
 
 // ---------------------------------------------------------------- base stations
 
-const char *BleLine(const Model &m) {
+// headset: the headset's panel, where it's the PC's Bluetooth all the same
+const char *BleLine(const Model &m, bool headset) {
   switch (m.ble) {
     case 1:
-      return m.power.empty() ? "Bluetooth is on. Looking for Lighthouse 2.0 base stations." : "Bluetooth is on.";
-    case -1: return "This PC has no Bluetooth adapter, so base stations can't be woken or put to sleep from here.";
-    case -2: return "Bluetooth is off. Turn it on in Windows settings to control base station power.";
-    case -3: return "This PC's Bluetooth doesn't support Bluetooth Low Energy, which base stations use.";
-    default: return "Looking for this PC's Bluetooth adapter.";
+      if (m.power.empty())
+        return headset ? "The PC's Bluetooth is on. Looking for Lighthouse 2.0 base stations."
+                       : "Bluetooth is on. Looking for Lighthouse 2.0 base stations.";
+      return headset ? "The PC's Bluetooth wakes base stations and puts them to sleep." : "Bluetooth is on.";
+    case -1:
+      return headset ? "The PC has no Bluetooth adapter, so base stations can't be woken or put to sleep."
+                     : "This PC has no Bluetooth adapter, so base stations can't be woken or put to sleep from here.";
+    case -2:
+      return headset ? "The PC's Bluetooth is off. Turn it on in Windows settings to control base station power."
+                     : "Bluetooth is off. Turn it on in Windows settings to control base station power.";
+    case -3:
+      return headset ? "The PC's Bluetooth doesn't support Bluetooth Low Energy, which base stations use."
+                     : "This PC's Bluetooth doesn't support Bluetooth Low Energy, which base stations use.";
+    default: return headset ? "Looking for the PC's Bluetooth adapter." : "Looking for this PC's Bluetooth adapter.";
   }
 }
 
@@ -450,7 +467,7 @@ void PowerSettings(Model &m, View &v, Actions &a, bool enabled) {
 }
 
 void PageStations(Model &m, View &v, Actions &a) {
-  bool ble = m.ble == 1 && !v.headset;
+  bool ble = m.ble == 1;
   Row r = TitleBegin("Base stations", Widths({"Scan", "Wake all", "Sleep all"}));
   if (Button("Scan", kNormal, ble && !m.ble_scanning)) a.Scan();
   ImGui::SameLine(0, S(8));
@@ -458,7 +475,7 @@ void PageStations(Model &m, View &v, Actions &a) {
   ImGui::SameLine(0, S(8));
   if (Button("Sleep all", kNormal, ble && !m.power.empty())) a.Power("", kCmdSleep);
   TitleEnd(r);
-  Wrapped(v.headset ? "Power control runs on the PC, over its Bluetooth." : BleLine(m), col::dim, kBody);
+  Wrapped(BleLine(m, v.headset), col::dim, kBody);
   Gap(10);
 
   struct Line {
@@ -523,7 +540,7 @@ void PageStations(Model &m, View &v, Actions &a) {
           const char *t = PowerText(*l.pw, &c, l.st && l.st->last_seen >= 0 && l.st->last_seen < 15);
           Text(t, c);
         } else {
-          Text(v.headset ? "On the PC" : "Not found", col::faint);
+          Text("Not found", col::faint);
         }
         cell(2);
         if (l.st) Text(Ago(l.st->last_seen).c_str(), l.st->last_seen >= 0 && l.st->last_seen < 15 ? col::text : col::dim);
@@ -563,7 +580,7 @@ void PageStations(Model &m, View &v, Actions &a) {
 
   CardBegin(W);
   CardTitle("Automatic power");
-  PowerSettings(m, v, a, !v.headset);
+  PowerSettings(m, v, a, true);
   CardEnd();
 }
 
@@ -814,13 +831,11 @@ void PageSettings(Model &m, View &v, Actions &a) {
               drv);
   CardEnd();
 
-  if (!v.headset) {
-    CardBegin(W);
-    CardTitle("Base stations");
-    Gap(4);
-    PowerSettings(m, v, a, true);
-    CardEnd();
-  }
+  CardBegin(W);
+  CardTitle("Base stations");
+  Gap(4);
+  PowerSettings(m, v, a, true);
+  CardEnd();
 
   CardBegin(W);
   CardTitle("Diagnostics");
@@ -894,16 +909,42 @@ std::string Plain(const std::string &md, size_t max) {
   return out;
 }
 
+// the headset's updater (lhs/install-frame.sh's timer), through its panel
+void HeadsetUpdates(const Model &m, View &v, Actions &a) {
+  const PanelInfo &p = m.panel;
+  KeyValue("Automatic updates", p.auto_update ? "On, every 6 hours" : "Off");
+  KeyValue("Last checked", p.checking ? "Checking now" : p.checked > 0 ? Ago((double)time(nullptr) - p.checked) : "Never");
+  if (!p.result.empty() && !p.checking) Text(p.result.c_str(), col::faint, g_fonts.body, kSmall + 0.5f);
+  Gap(6);
+  if (!p.staged.empty()) {
+    Text(F("%s is downloaded. It installs the next time the headset starts.", p.staged.c_str()).c_str(), col::text,
+         g_fonts.medium, kBody);
+    Gap(2);
+    if (Button("Install it now", kPrimary)) a.HeadsetInstall();
+    Text("Installing now restarts SteamVR on the headset.", col::dim, g_fonts.body, kSmall);
+  } else if (p.auto_update) {
+    if (Button("Check now##headset", kNormal, !p.checking)) a.HeadsetCheck();
+  } else {
+    Wrapped(v.headset ? "Run the installer on the headset again to update it, or to turn automatic updates back on."
+                      : "Run the installer on the headset again to update it, or to turn automatic updates back on:",
+            col::dim, kBody);
+    if (!v.headset) {
+      Gap(2);
+      CodeLine(F("curl -fsSL https://github.com/%s/releases/latest/download/install-frame.sh | bash", m.prefs.repo.c_str()), a);
+    }
+  }
+}
+
 void PageUpdates(Model &m, View &v, Actions &a) {
   const UpdateInfo &u = m.upd;
   bool busy = u.state == kUpdChecking || u.state == kUpdDownloading;
-  Row r = TitleBegin("Updates", v.headset ? 0 : ButtonWidth("Check now"));
-  if (!v.headset && Button("Check now", kNormal, !busy && !u.dev_build)) a.CheckUpdates();
+  Row r = TitleBegin("Updates", ButtonWidth("Check now"));
+  if (Button("Check now", kNormal, !busy && !u.dev_build)) a.CheckUpdates();
   TitleEnd(r);
   float W = ImGui::GetContentRegionAvail().x;
 
   CardBegin(W);
-  CardTitle("This PC");
+  CardTitle(v.headset ? "The PC" : "This PC");
   Gap(2);
   KeyValue("Installed", LHS_VERSION);
   if (m.have_extra && m.ex.driver_version[0] && strcmp(m.ex.driver_version, LHS_VERSION) != 0)
@@ -921,8 +962,8 @@ void PageUpdates(Model &m, View &v, Actions &a) {
       case kUpdAvailable:
         Text(F("Version %s is available.", u.latest.c_str()).c_str(), col::text, g_fonts.medium, kBody);
         Gap(2);
-        if (Button("Download and install", kPrimary, !v.headset)) a.InstallUpdate();
-        if (v.headset) Text("Install it from the PC's LighthouseSync window.", col::dim, g_fonts.body, kSmall);
+        if (Button("Download and install", kPrimary)) a.InstallUpdate();
+        if (v.headset) Text("It installs on the PC.", col::dim, g_fonts.body, kSmall);
         break;
       case kUpdDownloading:
         Text(F("Downloading %s", u.latest.c_str()).c_str(), col::dim);
@@ -932,7 +973,7 @@ void PageUpdates(Model &m, View &v, Actions &a) {
       case kUpdFailed:
         Wrapped(F("Couldn't update: %s", u.error.c_str()).c_str(), col::bad, kBody);
         Gap(2);
-        if (Button("Try again", kNormal, !v.headset)) a.CheckUpdates();
+        if (Button("Try again")) a.CheckUpdates();
         break;
       default: Text("Not checked yet.", col::dim); break;
     }
@@ -951,12 +992,16 @@ void PageUpdates(Model &m, View &v, Actions &a) {
   Gap(2);
   const char *model = m.st.headset[0] ? m.st.headset : nullptr;
   KeyValue("Headset", model ? model : "Not connected");
-  KeyValue("Headset software", m.have_extra && m.ex.module_version[0] ? m.ex.module_version : "Unknown");
+  if (m.panel.connected && !m.panel.installed.empty()) KeyValue("Installed", m.panel.installed);
+  else KeyValue("Headset software", m.have_extra && m.ex.module_version[0] ? m.ex.module_version : "Unknown");
   if (!u.latest.empty()) KeyValue("Latest", u.latest);
-  Gap(6);
   bool quest = model && strstr(model, "Quest");
   bool frame = model && strstr(model, "Frame");
-  if (!quest) {
+  if (m.panel.connected) {
+    HeadsetUpdates(m, v, a);
+    frame = true;  // nothing about Quests here
+  } else if (!quest) {
+    Gap(6);
     Wrapped(frame ? "On the Steam Frame, open a terminal in desktop mode and run this:"
                   : "On a Steam Frame, open a terminal in desktop mode and run this:",
             col::dim, kBody);
@@ -969,7 +1014,7 @@ void PageUpdates(Model &m, View &v, Actions &a) {
             col::faint, kSmall + 0.5f);
   }
   if (!frame) {
-    if (!quest) Gap(6);
+    Gap(6);
     Wrapped(quest ? "Magisk updates the module: open Magisk, go to Modules and tap Update on LighthouseSync."
                   : "On a Quest, Magisk updates the module: open Magisk, go to Modules and tap Update on LighthouseSync.",
             col::dim, kBody);
@@ -981,15 +1026,15 @@ void PageUpdates(Model &m, View &v, Actions &a) {
   Gap(4);
   SettingBegin("Check for updates automatically",
                "Looks for a new release when SteamVR starts and every 6 hours. Nothing installs until you choose to.", S(40));
-  if (Toggle("auto_check", &m.prefs.auto_check, !v.headset)) a.PrefsChanged();
+  if (Toggle("auto_check", &m.prefs.auto_check)) a.PrefsChanged();
   SettingEnd();
   Divider();
   SettingBegin("Update source",
                "The GitHub repository releases come from, as owner/name. Change it to follow a fork of LighthouseSync.",
                S(340));
   if (v.vr) {
-    VrText(a, "repo", "Update source", m.prefs.repo.c_str(), LHS_REPO, S(340), !v.headset);
-  } else if (TextField("repo", v.repo, m.prefs.repo, S(340), !v.headset)) {
+    VrText(a, "repo", "Update source", m.prefs.repo.c_str(), LHS_REPO, S(340), true);
+  } else if (TextField("repo", v.repo, m.prefs.repo, S(340))) {
     if (ValidRepo(v.repo.buf)) {
       m.prefs.repo = v.repo.buf;
       v.repo_error.clear();
@@ -1167,13 +1212,13 @@ void PageDiagnostics(Model &m, View &v, Actions &a) {
 }
 
 void PageLog(Model &m, View &v, Actions &a) {
-  Row r = TitleBegin("Log", v.headset ? ButtonWidth("Copy all") : Widths({"Copy all", "Open data folder"}));
-  if (Button("Copy all")) {
-    std::string all;
-    for (const auto &l : m.log) all += l + "\n";
-    a.Copy(all);
-  }
-  if (!v.headset) {
+  Row r = TitleBegin("Log", v.headset ? 0 : Widths({"Copy all", "Open data folder"}));
+  if (!v.headset) {  // the clipboard and folders are the PC's
+    if (Button("Copy all")) {
+      std::string all;
+      for (const auto &l : m.log) all += l + "\n";
+      a.Copy(all);
+    }
     ImGui::SameLine(0, S(8));
     if (Button("Open data folder")) a.OpenDataFolder();
   }

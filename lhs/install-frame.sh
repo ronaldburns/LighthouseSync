@@ -10,6 +10,9 @@
 # install.sh, which restarts SteamVR on the headset to load the driver. Installs where QuestLHSync's package does, so it
 # updates an existing QuestLHSync in place.
 #
+# It also installs LighthouseSync's panel for the headset's SteamVR dashboard (src/panel): it runs with SteamVR, shows
+# the PC's dashboard, and is under the dashboard's "Launch program" to open it.
+#
 # Updates after that (unless --no-auto-update): a systemd user timer looks for a new release every 6 hours and
 # downloads it, checked the same way, and a service installs it the next time the headset starts, before its SteamVR
 # does, so nothing restarts while the headset is in use.
@@ -18,8 +21,10 @@ set -euo pipefail
 REPO=${LHS_REPO:-@REPO@}   # the release workflow writes the repository it was built from
 case $REPO in @*) REPO=ronaldburns/LighthouseSync ;; esac
 DEST=$HOME/.local/share/questlhsync
-LHS=$DEST/lhs   # the version installed, an update waiting for the next start, this script
+LHS=$DEST/lhs   # the version installed, an update waiting for the next start, the last check, this script
 UNITS=$HOME/.config/systemd/user
+DATA=$HOME/.local/share
+PANEL=$DEST/lighthousesync-panel
 VRPATHREG=/opt/steamvr/bin/linuxarm64/vrpathreg
 # desktop mode's terminal has XDG_RUNTIME_DIR=/run/user/<uid>/nested_plasma, where systemctl --user finds no systemd
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
@@ -28,7 +33,12 @@ TMP=""   # a download folder to remove on exit
 trap 'rm -rf "$TMP"' EXIT
 
 say() { printf '%s\n' "$*"; }
-fail() { printf 'LighthouseSync: %s\n' "$*" >&2; exit 1; }
+checked() { mkdir -p "$LHS" && printf '%s\n%s\n' "$(date +%s)" "$1" > "$LHS/checked"; }  # for the panel
+fail() {
+  printf 'LighthouseSync: %s\n' "$*" >&2
+  [ "${mode:-}" = stage ] && checked "Couldn't check: $*"
+  exit 1
+}
 
 latest_tag() {  # GitHub answers releases/latest with a redirect to releases/tag/<tag>
   local url
@@ -55,11 +65,37 @@ fetch() {
 
 installed() { cat "$LHS/version" 2>/dev/null || true; }
 
+# the panel: before the package's install.sh, whose SteamVR restart then starts it (WantedBy=steamvr.service)
+install_panel() {  # <unpacked dir>
+  local src=$1/QuestLHSync-frame/lhs n
+  [ -f "$src/lighthousesync-panel" ] || return 0
+  mkdir -p "$DEST" "$UNITS" "$DATA/applications"
+  install -m 755 "$src/lighthousesync-panel" "$PANEL.new" && mv -f "$PANEL.new" "$PANEL"  # a running one keeps its copy
+  install -m 644 "$src/lighthousesync-panel.service" "$UNITS/lighthousesync-panel.service"
+  sed "s|@BINARY@|$PANEL|" "$src/lighthousesync.desktop" > "$DATA/applications/lighthousesync.desktop"
+  for n in 48 128 256; do  # Steam looks in hicolor/<size>/apps, and not for a 256-only icon
+    install -Dm644 "$src/icons/lighthousesync-$n.png" "$DATA/icons/hicolor/${n}x${n}/apps/lighthousesync.png"
+  done
+  systemctl --user daemon-reload
+  systemctl --user enable lighthousesync-panel.service >/dev/null 2>&1 || true
+}
+
+remove_panel() {
+  local n
+  systemctl --user disable --now lighthousesync-panel.service >/dev/null 2>&1 || true
+  rm -f "$UNITS/lighthousesync-panel.service" "$DATA/applications/lighthousesync.desktop" "$PANEL"
+  for n in 48 128 256; do rm -f "$DATA/icons/hicolor/${n}x${n}/apps/lighthousesync.png"; done
+}
+
 install_package() {  # <unpacked dir> <tag>
+  install_panel "$1"
   sh "$1/QuestLHSync-frame/install.sh"
   mkdir -p "$LHS"
   cp "$1/QuestLHSync-frame/uninstall.sh" "$LHS/uninstall.sh"
   printf '%s\n' "$2" > "$LHS/version"
+  if [ -f "$PANEL" ] && systemctl --user is-active --quiet steamvr.service; then
+    systemctl --user start lighthousesync-panel.service >/dev/null 2>&1 || true
+  fi
 }
 
 write_units() {
@@ -137,8 +173,12 @@ do_install() {
 do_stage() {
   local tag
   tag=$(latest_tag) || fail "couldn't find $REPO's latest release"
-  [ "$tag" = "$(installed)" ] && { say "$tag is installed"; return; }
-  [ "$tag" = "$(cat "$LHS/staged/version" 2>/dev/null || true)" ] && { say "$tag is waiting for the next start"; return; }
+  [ "$tag" = "$(installed)" ] && { say "$tag is installed"; checked "$tag is the latest release"; return; }
+  [ "$tag" = "$(cat "$LHS/staged/version" 2>/dev/null || true)" ] && {
+    say "$tag is waiting for the next start"
+    checked "$tag is downloaded"
+    return
+  }
   TMP=$(mktemp -d "$LHS/staging.XXXXXX")
   fetch "$tag" "$TMP"
   get "$tag" install-frame.sh "$TMP"
@@ -147,6 +187,7 @@ do_stage() {
   mv "$TMP" "$LHS/staged"
   TMP=""
   say "Downloaded $tag: it installs when the headset restarts"
+  checked "Downloaded $tag"
 }
 
 # at login, before SteamVR: install what do_stage downloaded
@@ -161,6 +202,7 @@ do_apply() {
 }
 
 do_uninstall() {
+  remove_panel
   remove_units
   if [ -f "$LHS/uninstall.sh" ]; then
     sh "$LHS/uninstall.sh"

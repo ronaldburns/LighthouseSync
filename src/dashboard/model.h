@@ -1,6 +1,6 @@
 // LighthouseSync dashboard: what the pages show (Model) and what they can ask for (Actions). Filled by the Windows
-// dashboard from the driver's shared memory, SteamVR, Bluetooth and GitHub; by the headset's panel from the PC.
-// No platform headers here.
+// dashboard from the driver's shared memory, SteamVR, Bluetooth, GitHub and the headset's panel. The headset's panel
+// shows the same pages, drawn on the PC (src/common/lhs_panel.h). No platform headers here.
 #pragma once
 #include <stdint.h>
 
@@ -50,6 +50,18 @@ struct UpdateInfo {
   bool dev_build = false;  // running from a build folder: updates come from git instead
 };
 
+// the headset's own updater (lhs/install-frame.sh), as its panel reports it while connected
+struct PanelInfo {
+  bool connected = false;
+  std::string version;       // the panel's LighthouseSync version
+  std::string installed;     // the release installed on the headset
+  std::string staged;        // a release downloaded for the next start, "" none
+  bool auto_update = false;  // its 6-hourly check is on
+  bool checking = false;
+  double checked = 0;        // when it last checked, Unix time, 0 never
+  std::string result;        // what that check said
+};
+
 // the dashboard's own settings (dashboard.json next to the driver's data)
 struct Prefs {
   float ui_scale = 1.0f;
@@ -84,6 +96,7 @@ struct Model {
   std::vector<StationPower> power;
 
   UpdateInfo upd;
+  PanelInfo panel;
   Prefs prefs;
   std::vector<std::string> log;  // tail of questlhsync.log, oldest first
   std::string data_dir;          // %LOCALAPPDATA%\QuestLHSync
@@ -103,10 +116,12 @@ struct Actions {
   virtual void Scan() = 0;                                                 // look for base stations again
   virtual void CheckUpdates() = 0;
   virtual void InstallUpdate() = 0;
+  virtual void HeadsetCheck() = 0;    // the headset's updater looks for a release now
+  virtual void HeadsetInstall() = 0;  // ...and installs the one it downloaded, restarting the headset's SteamVR
   virtual void OpenDataFolder() = 0;
   virtual void OpenUrl(const std::string &url) = 0;
   virtual void Copy(const std::string &text) = 0;
-  // VR only: the SteamVR keyboard for a text setting; the result goes to SetSetting(key)
+  // VR only: the SteamVR keyboard for a text setting (the headset's on its panel); the result goes to SetSetting(key)
   virtual void EditText(const char *key, const std::string &title, const std::string &value) = 0;
 };
 

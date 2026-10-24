@@ -1,9 +1,9 @@
 // QuestLHSync.exe: LighthouseSync's dashboard, a desktop window and a SteamVR dashboard page. The driver starts it
 // each session by upstream's file name and it exits with SteamVR; started by hand while SteamVR isn't running it's a
 // plain window (updates, base stations) that closes like any other.
-// The pages are ui.cpp's, drawn by Dear ImGui into pixels on the CPU (swr.cpp): one ImGui context for the window and
-// one for the SteamVR page, sharing the fonts.
-//   QuestLHSync.exe --preview <dir> [locked|acquiring|searching|stale] [width height scale]   sample pages as PNGs
+// The pages are ui.cpp's, drawn by Dear ImGui into pixels on the CPU (swr.cpp): one ImGui context for the window, one
+// for the SteamVR page and one for the headset's panel (panel_link.h, which sends it the pixels), sharing the fonts.
+//   QuestLHSync.exe --preview <dir> [locked|acquiring|searching|stale|headset] [width height scale]   sample pages
 //   QuestLHSync.exe --icon <file.png> [size]                     the icon (lhs/make_icon.py makes lhs/icon.ico)
 //   QuestLHSync.exe --selftest <file.txt>     checks what it can without showing anything or touching SteamVR
 #include <windows.h>
@@ -30,7 +30,9 @@
 
 #include "../driver/json.h"
 #include "ble.h"
+#include "icon.h"
 #include "imgui.h"
+#include "panel_link.h"
 #include "preview.h"
 #include "swr.h"
 #include "theme.h"
@@ -303,26 +305,6 @@ ImGuiKey KeyOf(WPARAM vk) {
   }
 }
 
-// ---------------------------------------------------------------- the icon: a base station's sweep reaching a headset
-
-void DrawIcon(ImDrawList *dl, float n) {
-  using namespace ui;
-  float u = n / 256.f;
-  auto P = [&](float x, float y) { return ImVec2(x * u, y * u); };
-  dl->AddRectFilled(P(8, 8), P(248, 248), col::card, 56 * u);
-  dl->AddRect(P(8, 8), P(248, 248), col::line, 56 * u, 0, 4 * u);
-  ImVec2 lens = P(84, 92);
-  dl->AddTriangleFilled(lens, P(214, 146), P(156, 214), Alpha(col::accent, 0.22f));
-  dl->AddLine(lens, P(214, 146), Alpha(col::accent, 0.75f), 4 * u);
-  dl->AddLine(lens, P(156, 214), Alpha(col::accent, 0.75f), 4 * u);
-  dl->AddRectFilled(P(46, 54), P(122, 130), col::raised_hi, 20 * u);
-  dl->AddCircleFilled(lens, 21 * u, col::bg, 40);
-  dl->AddCircleFilled(lens, 11 * u, col::accent, 32);
-  dl->AddRectFilled(P(144, 156), P(224, 208), col::text, 24 * u);
-  dl->AddCircleFilled(P(170, 182), 8.5f * u, col::card, 24);
-  dl->AddCircleFilled(P(198, 182), 8.5f * u, col::card, 24);
-}
-
 // ---------------------------------------------------------------- SteamVR
 
 struct VrPage {
@@ -399,7 +381,7 @@ struct App : Actions {
   Model m;
   ui::View desk_view, vr_view;
   ImFontAtlas *atlas = nullptr;
-  ImGuiContext *desk_ctx = nullptr, *vr_ctx = nullptr;
+  ImGuiContext *desk_ctx = nullptr, *vr_ctx = nullptr, *remote_ctx = nullptr;
   float desk_applied = 0, vr_applied = 0;  // the scale each context's style was made for
   swr::Image desk_img, vr_img, icon;
   std::vector<uint32_t> bgra;  // desk_img for GDI
@@ -430,6 +412,34 @@ struct App : Actions {
   double log_at = -1, check_at = 0;
   bool woke = false;
 
+  // the headset's panel: the same pages, drawn here at its size and sent to it
+  struct Remote : Actions {  // what its pages ask for, done here as for the others
+    App &a;
+    explicit Remote(App &app) : a(app) {}
+    void Command(int cmd) override { a.Command(cmd); }
+    void SetSetting(const char *key, const std::string &value) override { a.SetSetting(key, value); }
+    void PrefsChanged() override { a.PrefsChanged(); }
+    void Power(const std::string &name, int cmd) override { a.Power(name, cmd); }
+    void Scan() override { a.Scan(); }
+    void CheckUpdates() override { a.CheckUpdates(); }
+    void InstallUpdate() override { a.InstallUpdate(); }
+    void HeadsetCheck() override { a.HeadsetCheck(); }
+    void HeadsetInstall() override { a.HeadsetInstall(); }
+    void OpenDataFolder() override {}  // folders, links and the clipboard are the PC's: the headset view hides them
+    void OpenUrl(const std::string &) override {}
+    void Copy(const std::string &) override {}
+    void EditText(const char *key, const std::string &title, const std::string &value) override {
+      a.remote_kb_key = key;  // the headset's keyboard; its text comes back through the link
+      a.link.Keyboard(title, value);
+    }
+  } remote{*this};
+  PanelLink link;
+  ui::View remote_view;
+  swr::Image remote_img;
+  float remote_applied = 0;
+  double remote_input = -1, remote_drawn = -1;
+  std::string remote_kb_key;
+
   // ---- Actions
   void Command(int cmd) override {
     if (!shm.p) return;
@@ -448,13 +458,15 @@ struct App : Actions {
 
   void PrefsChanged() override {
     SavePrefs(prefs_path, m.prefs);
-    desk_applied = vr_applied = 0;  // the interface size may have changed
+    desk_applied = vr_applied = remote_applied = 0;  // the interface size may have changed
   }
 
   void Power(const std::string &name, int cmd) override { ble::Power(name, cmd); }
   void Scan() override { ble::Scan(); }
   void CheckUpdates() override { upd::Check(m.prefs.repo); }
   void InstallUpdate() override { upd::Install(); }
+  void HeadsetCheck() override { link.Check(); }
+  void HeadsetInstall() override { link.Install(); }
 
   void OpenDataFolder() override {
     CreateDirectoryW(data_dir.c_str(), nullptr);
@@ -638,6 +650,35 @@ struct App : Actions {
     KeyboardText(key, b);
   }
 
+  // the headset's panel: its pointer and keyboard into its context, its updater into the model
+  void TakeRemote() {
+    ImGui::SetCurrentContext(remote_ctx);
+    ImGuiIO &io = ImGui::GetIO();
+    for (const panel::Mouse &e : link.mouse) {
+      switch (e.kind) {
+        case panel::kMove: io.AddMousePosEvent(e.x, e.y); break;
+        case panel::kDown:
+        case panel::kUp:
+          io.AddMousePosEvent(e.x, e.y);
+          io.AddMouseButtonEvent(e.button ? 1 : 0, e.kind == panel::kDown);
+          break;
+        case panel::kScroll: io.AddMouseWheelEvent(e.x, e.y); break;
+        default: io.AddMousePosEvent(-FLT_MAX, -FLT_MAX); break;
+      }
+      remote_input = m.now;
+    }
+    link.mouse.clear();
+    for (const std::string &t : link.texts) {
+      if (remote_kb_key.empty()) continue;
+      std::string key = remote_kb_key;
+      remote_kb_key.clear();
+      KeyboardText(key, t);
+    }
+    link.texts.clear();
+    if (!link.info.connected) remote_kb_key.clear();
+    m.panel = link.info;
+  }
+
   void ReadDevices() {
     vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount];
     vr::VRSystem()->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseStanding, 0, poses, vr::k_unMaxTrackedDeviceCount);
@@ -697,7 +738,7 @@ struct App : Actions {
     return c;
   }
 
-  void Frame(ImGuiContext *ctx, ui::View &v, swr::Image &img, float scale, float &applied, double &drawn) {
+  void Frame(ImGuiContext *ctx, ui::View &v, swr::Image &img, float scale, float &applied, double &drawn, Actions &acts) {
     ImGui::SetCurrentContext(ctx);
     ImGuiIO &io = ImGui::GetIO();
     io.DisplaySize = ImVec2((float)img.w, (float)img.h);
@@ -708,46 +749,15 @@ struct App : Actions {
     }
     ui::AtlasNewFrame(atlas);
     ImGui::NewFrame();
-    ui::Draw(m, v, *this);
+    ui::Draw(m, v, acts);
     ImGui::Render();
     swr::UpdateTextures(ImGui::GetDrawData());
     swr::Render(ImGui::GetDrawData(), img, ui::col::bg);
     drawn = m.now;
   }
 
-  // the icon, with its rounded corners see-through: drawn over black and over white, the difference is the alpha
-  swr::Image Icon(int n) {
-    swr::Image b, w, out;
-    for (swr::Image *img : {&b, &w}) {
-      ImGui::SetCurrentContext(desk_ctx);
-      ImGuiIO &io = ImGui::GetIO();
-      io.DisplaySize = ImVec2((float)n, (float)n);
-      io.DeltaTime = 1.f / 60;
-      ui::AtlasNewFrame(atlas);
-      ImGui::NewFrame();
-      DrawIcon(ImGui::GetForegroundDrawList(), (float)n);
-      ImGui::Render();
-      swr::UpdateTextures(ImGui::GetDrawData());
-      img->Resize(n, n);
-      swr::Render(ImGui::GetDrawData(), *img, img == &b ? 0xFF000000u : 0xFFFFFFFFu);
-    }
-    out.Resize(n, n);
-    for (size_t i = 0; i < out.px.size(); i++) {
-      uint32_t pb = b.px[i], pw = w.px[i];
-      int a = 255 - (int)((pw & 255) - (pb & 255));
-      a = std::clamp(a, 0, 255);
-      uint32_t o = (uint32_t)a << 24;
-      for (int s = 0; s < 24; s += 8) {
-        int c = a ? std::min(255, (int)((pb >> s) & 255) * 255 / a) : 0;
-        o |= (uint32_t)c << s;
-      }
-      out.px[i] = o;
-    }
-    return out;
-  }
-
   HICON MakeHIcon(int n) {
-    swr::Image img = Icon(n);
+    swr::Image img = ui::IconImage(desk_ctx, atlas, n);
     BITMAPV5HEADER bh{};
     bh.bV5Size = sizeof bh;
     bh.bV5Width = n;
@@ -781,7 +791,7 @@ struct App : Actions {
 
   void DrawDesktop() {
     if (desk_img.w <= 0 || desk_img.h <= 0) return;
-    Frame(desk_ctx, desk_view, desk_img, DeskScale(), desk_applied, desk_drawn);
+    Frame(desk_ctx, desk_view, desk_img, DeskScale(), desk_applied, desk_drawn, *this);
     cursor = ImGui::GetMouseCursor();
     if (mouse_in) SetCursorNow();
     bgra.resize(desk_img.px.size());
@@ -988,11 +998,14 @@ struct App : Actions {
     ui::LoadFonts(atlas);
     vr_ctx = MakeContext();
     desk_ctx = MakeContext();
+    remote_ctx = MakeContext();
     vr_view.vr = true;
-    icon = Icon(256);
+    remote_view.vr = remote_view.headset = true;
+    icon = ui::IconImage(desk_ctx, atlas, 256);
     MakeWindow(inst, !managed || m.prefs.open_window);
     upd::Start(DriverRoot(), data_dir);
     ble::Start();
+    link.Start();
     check_at = m.now + 8;
 
     while (!quit) {
@@ -1035,6 +1048,10 @@ struct App : Actions {
         check_at = m.now + 6 * 3600;
         upd::Check(m.prefs.repo);
       }
+      // the panel on the headset the driver is connected to ("ip:port")
+      std::string host = m.have_status && !m.stale ? std::string(m.st.headset_addr, strnlen(m.st.headset_addr, sizeof m.st.headset_addr)) : "";
+      link.Poll(m.now, host.substr(0, host.find(':')));
+      TakeRemote();
 
       // draw what's visible: quickly after input (hover, presses), a few times a second otherwise
       bool desk_busy = m.now - desk_input < 0.6, vr_busy = m.now - vr_input < 0.6;
@@ -1043,11 +1060,19 @@ struct App : Actions {
       bool vr_vis = vr_up && vr::VROverlay()->IsOverlayVisible(page.main);
       if (vr_vis && (vr_drawn < 0 || m.now - vr_drawn >= (vr_busy ? 1 / 45. : 0.2))) {
         if (vr_img.w != kVrW) vr_img.Resize(kVrW, kVrH);
-        Frame(vr_ctx, vr_view, vr_img, kVrScale * m.prefs.ui_scale, vr_applied, vr_drawn);
+        Frame(vr_ctx, vr_view, vr_img, kVrScale * m.prefs.ui_scale, vr_applied, vr_drawn, *this);
         page.Show(vr_img);
       }
-      DWORD wait = desk_busy || vr_busy ? 5 : vr_vis ? 16 : 50;
-      MsgWaitForMultipleObjects(0, nullptr, FALSE, wait, QS_ALLINPUT);
+      bool remote_busy = m.now - remote_input < 0.6;
+      if (link.shown) link.shown = false, remote_drawn = -1;
+      if (link.CanSend() && (remote_drawn < 0 || m.now - remote_drawn >= (remote_busy ? 1 / 30. : 0.25))) {
+        if (remote_img.w != panel::kW) remote_img.Resize(panel::kW, panel::kH);
+        Frame(remote_ctx, remote_view, remote_img, kVrScale * m.prefs.ui_scale, remote_applied, remote_drawn, remote);
+        link.SendFrame(remote_img);
+      }
+      DWORD wait = desk_busy || vr_busy || remote_busy ? 5 : vr_vis || link.Visible() ? 16 : 50;
+      HANDLE ev = link.Event();
+      MsgWaitForMultipleObjects(ev ? 1 : 0, &ev, FALSE, wait, QS_ALLINPUT);
     }
 
     // SteamVR quit: the base stations as the user asked
@@ -1057,9 +1082,11 @@ struct App : Actions {
     if (vr_gone && m.prefs.on_quit)
       ble::PowerAllAndWait(m.prefs.on_quit == 1 ? kCmdStandby : kCmdSleep, m.prefs.known_stations, 12);
     ble::Stop();
+    link.Stop();
     if (hwnd) DestroyWindow(hwnd);
     ImGui::DestroyContext(desk_ctx);
     ImGui::DestroyContext(vr_ctx);
+    ImGui::DestroyContext(remote_ctx);
     IM_DELETE(atlas);
     return 0;
   }
@@ -1084,8 +1111,10 @@ int SelfTest(App &app, HINSTANCE inst, const std::string &out) {
   ui::LoadFonts(app.atlas);
   app.vr_ctx = app.MakeContext();
   app.desk_ctx = app.MakeContext();
+  app.remote_ctx = app.MakeContext();
   app.vr_view.vr = true;
-  app.icon = app.Icon(256);
+  app.remote_view.vr = app.remote_view.headset = true;
+  app.icon = ui::IconImage(app.desk_ctx, app.atlas, 256);
   app.MakeWindow(inst, false);
   line(app.hwnd ? F("window: made, hidden, %dx%d, dpi scale %.2f", app.desk_img.w, app.desk_img.h, app.dpi) : "window: FAILED");
 
@@ -1109,19 +1138,21 @@ int SelfTest(App &app, HINSTANCE inst, const std::string &out) {
   a = Now();
   for (int i = 0; i < 10; i++) {
     m.now = Now();
-    app.Frame(app.vr_ctx, app.vr_view, app.vr_img, kVrScale * m.prefs.ui_scale, app.vr_applied, app.vr_drawn);
+    app.Frame(app.vr_ctx, app.vr_view, app.vr_img, kVrScale * m.prefs.ui_scale, app.vr_applied, app.vr_drawn, app);
   }
   line(F("SteamVR page frame %dx%d: %.1f ms", kVrW, kVrH, (Now() - a) / 10 * 1000));
+  app.remote_img.Resize(panel::kW, panel::kH);
   m.prefs.developer = true;
   for (int p = 0; p < ui::kPageCount; p++) {
-    app.desk_view.page = app.vr_view.page = p;
+    app.desk_view.page = app.vr_view.page = app.remote_view.page = p;
     for (int i = 0; i < 2; i++) {
       m.now = Now();
       app.DrawDesktop();
-      app.Frame(app.vr_ctx, app.vr_view, app.vr_img, kVrScale, app.vr_applied, app.vr_drawn);
+      app.Frame(app.vr_ctx, app.vr_view, app.vr_img, kVrScale, app.vr_applied, app.vr_drawn, app);
+      app.Frame(app.remote_ctx, app.remote_view, app.remote_img, kVrScale, app.remote_applied, app.remote_drawn, app.remote);
     }
   }
-  line("pages: every page drawn in both");
+  line("pages: every page drawn in all three (window, SteamVR, headset panel)");
 
   upd::Start(DriverRoot(), app.data_dir);
   for (std::string repo : {m.prefs.repo, std::string("CreoleVR/QuestLHSync")}) {
@@ -1172,7 +1203,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     app.atlas = IM_NEW(ImFontAtlas)();
     ui::LoadFonts(app.atlas);
     app.desk_ctx = app.MakeContext();
-    swr::Image img = app.Icon(std::clamp(atoi(Arg(argv, argc, 3, "256").c_str()), 16, 1024));
+    swr::Image img = ui::IconImage(app.desk_ctx, app.atlas, std::clamp(atoi(Arg(argv, argc, 3, "256").c_str()), 16, 1024));
     return WritePng(Arg(argv, argc, 2, "icon.png").c_str(), img) ? 0 : 1;
   }
 

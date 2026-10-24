@@ -5,6 +5,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include <algorithm>
 
@@ -135,6 +136,14 @@ Model Sample(const char *kind) {
     m.upd.state = kUpdIdle;
   } else if (!strcmp(kind, "stale")) {
     m.stale = true;
+  } else if (!strcmp(kind, "headset")) {
+    m.panel.connected = true;
+    m.panel.version = "v1.26.3";
+    m.panel.installed = "v1.26.3";
+    m.panel.staged = "v1.26.4";
+    m.panel.auto_update = true;
+    m.panel.checked = (double)time(nullptr) - 2 * 3600;
+    m.panel.result = "Downloaded v1.26.4.";
   }
   return m;
 }
@@ -161,6 +170,8 @@ struct NoActions : Actions {
   void OpenUrl(const std::string &) override {}
   void Copy(const std::string &) override {}
   void EditText(const char *, const std::string &, const std::string &) override {}
+  void HeadsetCheck() override {}
+  void HeadsetInstall() override {}
 };
 
 }  // namespace
@@ -226,6 +237,7 @@ int RunPreview(const char *dir, const char *kind, int w, int h, float scale) {
   for (int p = 0; p < ui::kPageCount; p++) {
     ui::View v;
     v.page = p;
+    v.vr = v.headset = !strcmp(kind, "headset");  // the headset panel's pages
     for (int f = 0; f < 3; f++) {
       ui::AtlasNewFrame(atlas);
       ImGui::NewFrame();

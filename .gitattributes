@@ -4,3 +4,5 @@
 magisk/module/META-INF/** text eol=lf
 *.dll binary
 *.lib binary
+lhs/panel/*.service text eol=lf
+lhs/panel/*.desktop text eol=lf
