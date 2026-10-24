@@ -963,8 +963,9 @@ void PageUpdates(Model &m, View &v, Actions &a) {
     Gap(2);
     CodeLine(F("curl -fsSL https://github.com/%s/releases/latest/download/install-frame.sh | bash", m.prefs.repo.c_str()), a);
     Gap(2);
-    Wrapped("It downloads the latest release, checks it against the published checksums and restarts SteamVR on the "
-            "headset only when its driver changed.",
+    Wrapped("It installs the latest release, checked against the published checksums, and restarts SteamVR on the "
+            "headset. After that the headset keeps itself up to date: new releases download in the background and "
+            "install the next time it starts.",
             col::faint, kSmall + 0.5f);
   }
   if (!frame) {

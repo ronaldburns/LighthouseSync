@@ -198,7 +198,7 @@ void Init(LogFn log) {
       GetModuleFileNameW(mod, path, MAX_PATH)) {
     std::error_code ec;
     for (auto &f : std::filesystem::directory_iterator(std::filesystem::path(path).parent_path(), ec))
-      if (f.path().extension() == L".lhs-old") std::filesystem::remove(f.path(), ec);
+      if (f.path().extension().wstring().rfind(L".lhs-old", 0) == 0) std::filesystem::remove(f.path(), ec);  // and .lhs-old2...
   }
   Log(std::string(LHS_NAME " ") + LHS_VERSION + " (updates from github.com/" + LHS_REPO + ")");
 }
